@@ -689,10 +689,10 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         rollout_full_prompt_and_completion_parallelized.curriculum = CurriculumScheduler(
             initial_max_turn=2,
             final_max_turn=30,
-            rollouts_per_stage=1280,
+            rollouts_per_stage=1024,
             initial_hint_prob=0.7,
             final_hint_prob=0.1,
-            warmup_rollouts=1280,
+            warmup_rollouts=1024,
         )
 
     # Retrieve static variables
