@@ -111,7 +111,7 @@ def extract_bid_from_action(action_text, obs_text):
         action_id = int(action_text.strip())
         # The bid value is action_id + 1
         return action_id + 1
-    except:
+    except Exception:
         return None
     
     
@@ -122,8 +122,8 @@ class CurriculumScheduler:
     def __init__(
         self,
         initial_max_turn=1,
-        final_max_turn=30,
-        rollouts_per_stage=100 ,
+        final_max_turn=13,
+        rollouts_per_stage=1280,
         initial_hint_prob=0.75,
         final_hint_prob=0.0,
         warmup_rollouts=128,
@@ -360,7 +360,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     }
 
 
-def rollout_full_prompt_and_completion_parallelized(
+def rollout_first_prompt_and_completion_parallelized_curriculum(
     prompts: list[str],
     trainer,
     max_turns: int = 30,
@@ -369,10 +369,13 @@ def rollout_full_prompt_and_completion_parallelized(
     Parallelized rollout function for game environments.
     Uses full prompt and completion IDs with action masking.
     """
-
     # --- Constants for context length management ---
     MAX_EPISODE_TOKENS = 16384  # Max tokens for completion sequence (truncate if exceeded)
-    MAX_PROMPT_LEN = 24576      # Max prompt tokens before ending episode early
+    MAX_PROMPT_LEN = 4225      # Max prompt tokens before ending episode early
+    
+    # --- Reward Shaping Parameters ---
+    STRATEGY_REWARD_WEIGHT = 0.5  # Weight for strategy adherence vs final score
+    STEP_STRATEGY_REWARD = 0.1    # Immediate reward for following strategy at each step
 
     games_to_task_id_range = {
         "goofspiel": (0, 99999999),
@@ -388,7 +391,7 @@ def rollout_full_prompt_and_completion_parallelized(
     selected_game = "goofspiel"
 
     # --- 1. Static Initialization (Once per Rank) ---
-    if not getattr(rollout_full_prompt_and_completion_parallelized, "initialized", False):
+    if not getattr(rollout_first_prompt_and_completion_parallelized_curriculum, "initialized", False):
         rank = int(os.environ.get("LOCAL_RANK", "0"))
         raw_urls = os.environ.get("ENVIRONMENT_SERVER_URLS", "")
         server_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
@@ -410,24 +413,43 @@ def rollout_full_prompt_and_completion_parallelized(
             except Exception as e:
                 raise RuntimeError(f"Failed to init server {base_url}: {e}")
 
-        rollout_full_prompt_and_completion_parallelized.rank = rank
-        rollout_full_prompt_and_completion_parallelized.env_pool = env_pool
-        rollout_full_prompt_and_completion_parallelized.num_servers = len(env_pool)
-        rollout_full_prompt_and_completion_parallelized.initialized = True
-        rollout_full_prompt_and_completion_parallelized.thread_pool = ThreadPoolExecutor(max_workers=len(env_pool))
-        rollout_full_prompt_and_completion_parallelized.generation_semaphore = Semaphore(1)
-        rollout_full_prompt_and_completion_parallelized.games_to_task_id_range = games_to_task_id_range
-        rollout_full_prompt_and_completion_parallelized.selected_game = selected_game
+        rollout_first_prompt_and_completion_parallelized_curriculum.rank = rank
+        rollout_first_prompt_and_completion_parallelized_curriculum.env_pool = env_pool
+        rollout_first_prompt_and_completion_parallelized_curriculum.num_servers = len(env_pool)
+        rollout_first_prompt_and_completion_parallelized_curriculum.initialized = True
+        rollout_first_prompt_and_completion_parallelized_curriculum.thread_pool = ThreadPoolExecutor(max_workers=len(env_pool))
+        rollout_first_prompt_and_completion_parallelized_curriculum.generation_semaphore = Semaphore(1)
+        rollout_first_prompt_and_completion_parallelized_curriculum.games_to_task_id_range = games_to_task_id_range
+        rollout_first_prompt_and_completion_parallelized_curriculum.selected_game = selected_game
+        
+        # Initialize curriculum scheduler
+        rollout_first_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
+            initial_max_turn=trainer.args.initial_max_turn,
+            final_max_turn=13,
+            rollouts_per_stage=trainer.args.rollouts_per_stage,
+            initial_hint_prob=0.75,
+            final_hint_prob=0.0,
+            warmup_rollouts=trainer.args.rollouts_per_stage,
+        )
+        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=13, rollouts_per_stage={trainer.args.rollouts_per_stage}, initial_hint_prob=0.75, final_hint_prob=0.0, warmup_rollouts={trainer.args.rollouts_per_stage}")
 
     # Retrieve static variables
-    rank = rollout_full_prompt_and_completion_parallelized.rank
-    env_pool = rollout_full_prompt_and_completion_parallelized.env_pool
-    num_servers = rollout_full_prompt_and_completion_parallelized.num_servers
-    games_to_task_id_range = rollout_full_prompt_and_completion_parallelized.games_to_task_id_range
-    selected_game = rollout_full_prompt_and_completion_parallelized.selected_game
-
+    rank = rollout_first_prompt_and_completion_parallelized_curriculum.rank
+    env_pool = rollout_first_prompt_and_completion_parallelized_curriculum.env_pool
+    num_servers = rollout_first_prompt_and_completion_parallelized_curriculum.num_servers
+    games_to_task_id_range = rollout_first_prompt_and_completion_parallelized_curriculum.games_to_task_id_range
+    selected_game = rollout_first_prompt_and_completion_parallelized_curriculum.selected_game
+    curriculum = rollout_first_prompt_and_completion_parallelized_curriculum.curriculum
+    
     tokenizer = trainer.processing_class
     TIMEOUT = 2400
+    
+    # Get current curriculum parameters
+    total_rollouts = curriculum.total_rollouts
+    current_max_turn = curriculum.get_max_turn()
+    target_training_turn = current_max_turn - 1
+    current_hint_prob = curriculum.get_hint_prob()
+    print(f"[CURRICULUM] Rollout {total_rollouts}: max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}")
 
     def run_single_prompt(index: int, prompt: str):
         # Generate a random game_id for this episode
@@ -447,6 +469,14 @@ def rollout_full_prompt_and_completion_parallelized(
         done = False
         train_reward = 0.0
         turn_number = 0
+        
+        # Track strategy adherence
+        strategy_followed_count = 0
+        total_strategy_opportunities = 0
+        step_rewards = [] 
+        all_steps_correct = True
+        # Determine if this episode gets hints
+        use_hints = random.random() < current_hint_prob
 
         # --- Reset Environment (POST /reset) ---
         payload = {"task_id": game_id, "seed": 42, "opponent": "mcts"}
@@ -471,13 +501,97 @@ def rollout_full_prompt_and_completion_parallelized(
         # --- Build Conversation History ---
         # Fisrt make system prompt
         system_prompt = "You are playing goofspiel.\n\n# Game Rules\nGOOFSPIEL RULES:\nSetup: Each player has bid cards numbered 1 to N. A prize deck with cards 1 to N is shuffled.\nGoal: Win the most points by bidding on prize cards.\n\nEach turn:\n1. Reveal top prize card (worth its face value in points)\n2. Players simultaneously play one bid card from their hand\n3. Highest bidder wins the prize card (adds its value to score)\n4. If bids tie, prize card is discarded (no one gets points)\n\nWinning: Player with most points after all rounds wins.\n\n\n# Output Format\nYou must respond with ONLY the action ID (a single number).\nDo NOT include descriptions or explanations.\n\nExamples:\n- For action \"0 -> roll\": respond \"0\"\n- For action \"89 -> a3\": respond \"89\""
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": formatted_observation}]
+
+        # Add suggestion for playing strategy based on curriculum
+        if use_hints:
+            suggestion_prompt = "\n\nThe best strategies is to bid the card with same value as the point card \n\nExample: \nIf the point card is 1, bid using card 1, likely action ID 0\nIf the point card is 13, bid using card 13, likely action ID 12\nIf the point card is 10, bid using card 10, likely action ID 9\nAlways bid following this strategy to maximize your winning chance."
+            system_prompt += suggestion_prompt
+
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Strategy forcing for turns before target training turn
+        while not done and (turn_number < target_training_turn):
+            messages.append({"role": "user", "content": formatted_observation})
+
+            hand_size = count_hand_cards(formatted_observation)
+            if hand_size <= 1:
+                target_training_turn = turn_number
+                break
+            
+            prize_card = extract_prize_card(formatted_observation)
+            action_id = prize_card - 1
+
+            messages.append({"role": "assistant", "content": str(action_id)})
+
+            # --- Step Environment (POST /step) ---
+            try:
+                formatted_observation = ""
+                step_payload = {"action": action_to_send, "episode_id": episode_id}
+                step_res = requests.post(f"{env_endpoint}/step", json=step_payload, timeout=TIMEOUT)
+                step_res.raise_for_status()
+                step_data = step_res.json()
+                step_block = step_data["result"]
+
+                # Extract response data
+                raw_observation = step_block.get("observation", "")
+                formatted_observation = extract_and_format_observation(raw_observation)
+                step_reward = step_block.get("reward", 0)
+                done = step_block.get("done", False)
+
+            except Exception as e:
+                print(f"Step failed: {e}")
+                step_reward = -0.01
+                done = False
+
+            turn_number += 1
+
+        if done:
+            print(
+                f"[GT] Game {game_id} ended during strategy forcing phase at turn {turn_number}. "
+                f"Returning fallback."
+            )
+            return index, None
+
+        messages.append({"role": "user", "content": formatted_observation})
+        prize_card = extract_prize_card(formatted_observation)
+
+        with rollout_first_prompt_and_completion_parallelized_curriculum.generation_semaphore:
+            rollout_out = generate_rollout_completions(
+                trainer, prompts=[messages], as_chat=True
+            )[0]
+
+        prompt_ids = rollout_out.get("prompt_ids", [])
+        completion_ids = rollout_out.get("completion_ids", [])
+        logprobs = rollout_out.get("logprobs", [])
+        completion_text = tokenizer.decode(
+            completion_ids, skip_special_tokens=True
+        ).strip()
+
+        # Parse action from model output
+        action_to_send = completion_text
+        if action_to_send.endswith("</s>"):
+            action_to_send = action_to_send[:-5]
+        if "Action:" in action_to_send:
+            action_to_send = action_to_send.split("Action:")[-1].strip()
+
+        # Check strategy adherence for training turn
+        bid_card = extract_bid_from_action(action_to_send, formatted_observation)
+        strategy_followed = (
+            bid_card is not None and prize_card is not None and bid_card == prize_card
+        )
+
+        # Step environment with model's action
+        invalid_action = False
+
 
         # --- Interaction Loop ---
-        while not done and (turn_number < max_turns):
+        while not done and (turn_number < current_max_turn):
+            # Extract prize card before taking action
+            prize_card = extract_prize_card(formatted_observation)
+            
             # Generate Rollout Completion
             # Only allow one thread to generate rollout completions at a time
-            with rollout_full_prompt_and_completion_parallelized.generation_semaphore:
+            with rollout_first_prompt_and_completion_parallelized_curriculum.generation_semaphore:
                 rollout_outputs = generate_rollout_completions(trainer, prompts=[messages], as_chat=True)[0]
 
             prompt_ids = rollout_outputs.get("prompt_ids", [])
@@ -520,7 +634,6 @@ def rollout_full_prompt_and_completion_parallelized(
                 episode_action_mask.extend([1] * len(completion_ids))
                 if prev_full_ids is not None:
                     prev_full_ids = prev_full_ids + completion_ids
-
             messages.append({"role": "assistant", "content": completion_text})
 
             # --- Parse Action ---
@@ -531,6 +644,24 @@ def rollout_full_prompt_and_completion_parallelized(
             # Parse ReAct format
             if "Action:" in action_to_send:
                 action_to_send = action_to_send.split("Action:")[-1].strip()
+                
+            # --- Check Strategy Adherence ---
+            bid_card = extract_bid_from_action(action_to_send, formatted_observation)
+            if bid_card is not None:
+                total_strategy_opportunities += 1
+                if bid_card == prize_card and all_steps_correct:
+                    strategy_followed_count += 1
+                    # Give immediate reward for following strategy
+                    step_reward = STEP_STRATEGY_REWARD
+                    step_rewards.append(step_reward)
+                else:
+                    all_steps_correct = False
+                    step_rewards.append(0.0)
+            else:
+                # Invalid action - counts as a strategy opportunity that was NOT followed
+                total_strategy_opportunities += 1
+                all_steps_correct = False
+                step_rewards.append(0.0)
 
             # --- Step Environment (POST /step) ---
             try:
@@ -570,13 +701,33 @@ def rollout_full_prompt_and_completion_parallelized(
             episode_completion_ids = episode_completion_ids[:MAX_EPISODE_TOKENS]
             episode_logprobs = episode_logprobs[:MAX_EPISODE_TOKENS]
             episode_action_mask = episode_action_mask[:MAX_EPISODE_TOKENS]
+            
+        # --- Calculate Final Reward with Strategy Shaping ---
+        # Strategy adherence ratio
+        strategy_ratio = strategy_followed_count / total_strategy_opportunities if total_strategy_opportunities > 0 else 0.0
+        
+        # Combine immediate step rewards
+        immediate_rewards = sum(step_rewards)
+        
+        # For short episodes (curriculum learning), prioritize strategy adherence
+        # For full episodes, blend strategy with final score
+        if not done:
+            # Partial episode - focus on strategy
+            shaped_reward = immediate_rewards + strategy_ratio
+        else:
+            # Full episode - blend strategy adherence with final score
+            shaped_reward = (
+                STRATEGY_REWARD_WEIGHT * strategy_ratio +
+                (1 - STRATEGY_REWARD_WEIGHT) * train_reward +
+                immediate_rewards
+            )
 
         # Apply invalid action penalty
-        train_reward = train_reward - 0.01 * float(invalid_count)
+        shaped_reward = shaped_reward - 0.05 * float(invalid_count)
 
+        # Log in one line
         print("======")
-        print("game_id: ", game_id)
-        print(messages)
+        print(f"id: {game_id}, max_turn: {current_max_turn}, hints: {use_hints}", f"Strategy: {strategy_followed_count}/{total_strategy_opportunities} ({strategy_ratio:.2%})")
         print("======")
 
         return index, {
@@ -584,12 +735,14 @@ def rollout_full_prompt_and_completion_parallelized(
             "completion_ids": episode_completion_ids,
             "action_mask": episode_action_mask,
             "logprobs": episode_logprobs,
-            "reward": train_reward
+            "reward": shaped_reward,
+            "strategy_ratio": strategy_ratio,
+            "final_score": train_reward,
         }
 
     # --- Execute in parallel ---
     results = [None] * len(prompts)
-    executor = rollout_full_prompt_and_completion_parallelized.thread_pool
+    executor = rollout_first_prompt_and_completion_parallelized_curriculum.thread_pool
 
     futures = [
         executor.submit(run_single_prompt, i, p)
@@ -607,10 +760,20 @@ def rollout_full_prompt_and_completion_parallelized(
                 "completion_ids": [1],
                 "action_mask": [0],
                 "logprobs": [1.0],
-                "reward": 0.0
+                "reward": 0.0,
+                "strategy_ratio": 0.0,
+                "final_score": 0.0,
             }
+            
+    # Update curriculum after batch
+    curriculum.step(len(prompts))
 
     list_results = [r for r in results if r is not None]
+    
+    # Log batch statistics
+    avg_strategy = sum(r["strategy_ratio"] for r in list_results) / len(list_results) if list_results else 0
+    avg_final = sum(r["final_score"] for r in list_results) / len(list_results) if list_results else 0
+    print(f"[BATCH] Avg Strategy Adherence: {avg_strategy:.2%}, Avg Final Score: {avg_final:.3f}")
 
     # ---- Aggregate ----
     return {
@@ -631,10 +794,9 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
     Parallelized rollout function for game environments.
     Uses full prompt and completion IDs with action masking.
     """
-
     # --- Constants for context length management ---
     MAX_EPISODE_TOKENS = 16384  # Max tokens for completion sequence (truncate if exceeded)
-    MAX_PROMPT_LEN = 24576      # Max prompt tokens before ending episode early
+    MAX_PROMPT_LEN = 4225      # Max prompt tokens before ending episode early
     
     # --- Reward Shaping Parameters ---
     STRATEGY_REWARD_WEIGHT = 0.5  # Weight for strategy adherence vs final score
@@ -654,7 +816,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
     selected_game = "goofspiel"
 
     # --- 1. Static Initialization (Once per Rank) ---
-    if not getattr(rollout_full_prompt_and_completion_parallelized, "initialized", False):
+    if not getattr(rollout_full_prompt_and_completion_parallelized_curriculum, "initialized", False):
         rank = int(os.environ.get("LOCAL_RANK", "0"))
         raw_urls = os.environ.get("ENVIRONMENT_SERVER_URLS", "")
         server_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
@@ -676,32 +838,33 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             except Exception as e:
                 raise RuntimeError(f"Failed to init server {base_url}: {e}")
 
-        rollout_full_prompt_and_completion_parallelized.rank = rank
-        rollout_full_prompt_and_completion_parallelized.env_pool = env_pool
-        rollout_full_prompt_and_completion_parallelized.num_servers = len(env_pool)
-        rollout_full_prompt_and_completion_parallelized.initialized = True
-        rollout_full_prompt_and_completion_parallelized.thread_pool = ThreadPoolExecutor(max_workers=len(env_pool))
-        rollout_full_prompt_and_completion_parallelized.generation_semaphore = Semaphore(1)
-        rollout_full_prompt_and_completion_parallelized.games_to_task_id_range = games_to_task_id_range
-        rollout_full_prompt_and_completion_parallelized.selected_game = selected_game
+        rollout_full_prompt_and_completion_parallelized_curriculum.rank = rank
+        rollout_full_prompt_and_completion_parallelized_curriculum.env_pool = env_pool
+        rollout_full_prompt_and_completion_parallelized_curriculum.num_servers = len(env_pool)
+        rollout_full_prompt_and_completion_parallelized_curriculum.initialized = True
+        rollout_full_prompt_and_completion_parallelized_curriculum.thread_pool = ThreadPoolExecutor(max_workers=len(env_pool))
+        rollout_full_prompt_and_completion_parallelized_curriculum.generation_semaphore = Semaphore(1)
+        rollout_full_prompt_and_completion_parallelized_curriculum.games_to_task_id_range = games_to_task_id_range
+        rollout_full_prompt_and_completion_parallelized_curriculum.selected_game = selected_game
         
         # Initialize curriculum scheduler
-        rollout_full_prompt_and_completion_parallelized.curriculum = CurriculumScheduler(
-            initial_max_turn=2,
-            final_max_turn=30,
-            rollouts_per_stage=1024,
-            initial_hint_prob=0.7,
+        rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
+            initial_max_turn=trainer.args.initial_max_turn,
+            final_max_turn=13,
+            rollouts_per_stage=trainer.args.rollouts_per_stage,
+            initial_hint_prob=0.75,
             final_hint_prob=0.0,
-            warmup_rollouts=1024,
+            warmup_rollouts=trainer.args.rollouts_per_stage,
         )
+        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=13, rollouts_per_stage={trainer.args.rollouts_per_stage}, initial_hint_prob=0.75, final_hint_prob=0.0, warmup_rollouts={trainer.args.rollouts_per_stage}")
 
     # Retrieve static variables
-    rank = rollout_full_prompt_and_completion_parallelized.rank
-    env_pool = rollout_full_prompt_and_completion_parallelized.env_pool
-    num_servers = rollout_full_prompt_and_completion_parallelized.num_servers
-    games_to_task_id_range = rollout_full_prompt_and_completion_parallelized.games_to_task_id_range
-    selected_game = rollout_full_prompt_and_completion_parallelized.selected_game
-    curriculum = rollout_full_prompt_and_completion_parallelized.curriculum
+    rank = rollout_full_prompt_and_completion_parallelized_curriculum.rank
+    env_pool = rollout_full_prompt_and_completion_parallelized_curriculum.env_pool
+    num_servers = rollout_full_prompt_and_completion_parallelized_curriculum.num_servers
+    games_to_task_id_range = rollout_full_prompt_and_completion_parallelized_curriculum.games_to_task_id_range
+    selected_game = rollout_full_prompt_and_completion_parallelized_curriculum.selected_game
+    curriculum = rollout_full_prompt_and_completion_parallelized_curriculum.curriculum
     
     tokenizer = trainer.processing_class
     TIMEOUT = 2400
@@ -777,7 +940,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             
             # Generate Rollout Completion
             # Only allow one thread to generate rollout completions at a time
-            with rollout_full_prompt_and_completion_parallelized.generation_semaphore:
+            with rollout_full_prompt_and_completion_parallelized_curriculum.generation_semaphore:
                 rollout_outputs = generate_rollout_completions(trainer, prompts=[messages], as_chat=True)[0]
 
             prompt_ids = rollout_outputs.get("prompt_ids", [])
@@ -820,7 +983,6 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
                 episode_action_mask.extend([1] * len(completion_ids))
                 if prev_full_ids is not None:
                     prev_full_ids = prev_full_ids + completion_ids
-
             messages.append({"role": "assistant", "content": completion_text})
 
             # --- Parse Action ---
@@ -845,6 +1007,9 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
                     all_steps_correct = False
                     step_rewards.append(0.0)
             else:
+                # Invalid action - counts as a strategy opportunity that was NOT followed
+                total_strategy_opportunities += 1
+                all_steps_correct = False
                 step_rewards.append(0.0)
 
             # --- Step Environment (POST /step) ---
@@ -907,12 +1072,11 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             )
 
         # Apply invalid action penalty
-        shaped_reward = shaped_reward - 0.01 * float(invalid_count)
+        shaped_reward = shaped_reward - 0.05 * float(invalid_count)
 
+        # Log in one line
         print("======")
-        print(f"game_id: {game_id}, max_turn: {current_max_turn}, hints: {use_hints}")
-        print(f"Strategy: {strategy_followed_count}/{total_strategy_opportunities} ({strategy_ratio:.2%})")
-        print(f"Final Score: {train_reward:.3f}, Shaped Reward: {shaped_reward:.3f}")
+        print(f"id: {game_id}, max_turn: {current_max_turn}, hints: {use_hints}", f"Strategy: {strategy_followed_count}/{total_strategy_opportunities} ({strategy_ratio:.2%})")
         print("======")
 
         return index, {
@@ -927,7 +1091,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
 
     # --- Execute in parallel ---
     results = [None] * len(prompts)
-    executor = rollout_full_prompt_and_completion_parallelized.thread_pool
+    executor = rollout_full_prompt_and_completion_parallelized_curriculum.thread_pool
 
     futures = [
         executor.submit(run_single_prompt, i, p)

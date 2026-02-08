@@ -13,50 +13,71 @@ allow_find_lk_lr = False
 
 GRPO_CONFIG = {
     "0_1_b": {
-        "lr": 8e-6,
+        "lr": 3e-5,
         "distributed": "ddp",
         "gpu_count": 1,
-        "batch_size": 20,
+        "batch_size": 4,
+        "gradient_accumulation_steps": 6,
         "vllm_gpu_memory_utilization": 0.4,
+        "use_lora": True,
+        "beta": 0.02,
+        "num_generations": 4,
+        "initial_max_turn": 1,
+        "rollouts_per_stage": 1600,
     },
     "1_2_b": {
         "lr": 8e-6,
         "distributed": "ddp",
         "gpu_count": 1,
-        "batch_size": 20,
+        "batch_size": 3,
+        "gradient_accumulation_steps": 12,
         "vllm_gpu_memory_utilization": 0.4,
+        "beta": 0.04,
+        "num_generations": 4,
+        "rollouts_per_stage": 1280,
     },
     "2_4_b": {
         "lr": 8e-6,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 2,
+        "gradient_accumulation_steps": 8,
         "vllm_gpu_memory_utilization": 0.3,
         "use_lora": True,
+        "beta": 0.01,
+        "num_generations": 4,
     },
     "4_5_b": {
         "lr": 6e-6,
         "distributed": "ddp",
         "gpu_count": 2,
-        "batch_size": 16,
+        "batch_size": 2,
+        "gradient_accumulation_steps": 8,
         "use_lora": True,
         "vllm_gpu_memory_utilization": 0.4,
+        "beta": 0.01,
     },
     "5_6_b": {
         "lr": 6e-6,
         "distributed": "ddp",
         "gpu_count": 2,
-        "batch_size": 16,
+        "batch_size": 2,
+        "gradient_accumulation_steps": 8,
         "use_lora": True,
         "vllm_gpu_memory_utilization": 0.4,
+        "beta": 0.01,
     },
+    # TODO: change to correct gpu_count = 4
     "6_9_b": {
         "lr": 6e-6,
         "distributed": "ddp",
-        "gpu_count": 4,
-        "batch_size": 16,
+        "gpu_count": 2,
+        "batch_size": 2,
+        "gradient_accumulation_steps": 8,
         "use_lora": True,
         "vllm_gpu_memory_utilization": 0.5,
+        "beta": 0.01,
+        "rollouts_per_stage": 768,
     },
     "9_12_b": {
         "lr": 6e-6,
@@ -65,6 +86,7 @@ GRPO_CONFIG = {
         "use_lora": True,
         "batch_size": 16,
         "vllm_gpu_memory_utilization": 0.6,
+        "beta": 0.01,
     },
     "12_15_b": {
         "lr": 5e-6,
@@ -73,6 +95,7 @@ GRPO_CONFIG = {
         "use_lora": True,
         "batch_size": 2,
         "vllm_gpu_memory_utilization": 0.8,
+        "beta": 0.01,
     },
     "15_20_b": {
         "lr": 5e-6,
@@ -82,6 +105,7 @@ GRPO_CONFIG = {
         "batch_size": 16,
         "vllm_gpu_memory_utilization": 0.6,
         "use_vllm": False,
+        "beta": 0.01,
     },
     "20_40_b": {
         "lr": 4e-6,
@@ -92,6 +116,7 @@ GRPO_CONFIG = {
         "vllm_gpu_memory_utilization": 0.6,
         "use_vllm": False,
         "use_4bit": True,
+        "beta": 0.01,
     },
     "40_80_b": {
         "lr": 3e-6,
@@ -102,6 +127,7 @@ GRPO_CONFIG = {
         "vllm_gpu_memory_utilization": 0.7,
         "use_vllm": False,
         "use_4bit": True,
+        "beta": 0.01,
     },
 }
 
@@ -154,6 +180,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
         "vllm_gpu_memory_utilization",
         "num_generations",
         "disable_fa",
+        "beta",
     ]
     for key in required_keys:
         if key not in config:
@@ -192,9 +219,11 @@ def get_run_cmd(config: dict, gpu_nums: int):
     --optim {optimizer} \
     --use_liger {use_liger} --num_generations {num_generations} --vllm_mode colocate --vllm_gpu_memory_utilization {vllm_gpu_memory_utilization} \
     --disable_fa {disable_fa} \
-    --beta 0.01 \
+    --beta {beta} \
+    --num_generations {num_generations} \
     --loss_type dr_grpo \
-    --do_eval False"""
+    --do_eval False \
+    --vllm_max_model_len 4225"""
     )
 
     if config.get("use_lora", False):
@@ -221,6 +250,11 @@ def get_run_cmd(config: dict, gpu_nums: int):
             template
             + " --load_in_4bit True --use_bnb_nested_quant True --bnb_4bit_quant_type nf4"
         )
+
+    if config.get("initial_max_turn", 2) != 2:
+        template = template + f" --initial_max_turn {config.get('initial_max_turn', 2)}"
+    if config.get("rollouts_per_stage", 1280) != 1280:
+        template = template + f" --rollouts_per_stage {config.get('rollouts_per_stage', 1280)}"
     return template
 
 
@@ -245,12 +279,15 @@ def get_training_json(train_info: dict) -> dict:
         "request_path": train_info["request_path"],
         "distributed": config.get("distributed", "ddp"),
         "gradient_checkpointing": get_gradient_checkpointing(model_name),
-        "gradient_accumulation_steps": 1,
+        "gradient_accumulation_steps": config.get("gradient_accumulation_steps", 8),
         "vllm_gpu_memory_utilization": config.get("vllm_gpu_memory_utilization", 0.4),
-        "num_generations": 4,
         "use_vllm": get_use_vllm(model_architecture, model_name),
         "tensor_parallel": config.get("tensor_parallel", False),
         "use_4bit": config.get("use_4bit", False),
+        "beta": config.get("beta", 0.01),
+        "num_generations": config.get("num_generations", 4),
+        "initial_max_turn": config.get("initial_max_turn", 2),
+        "rollouts_per_stage": config.get("rollouts_per_stage", 1280),
     }
 
     if model_name == "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5":
@@ -266,7 +303,6 @@ def get_training_json(train_info: dict) -> dict:
     train_request["periodic_save_steps"] = 75
 
     total_batch_size = run_config["batch_size"] * run_config["gpu_nums"]
-    run_config["gradient_accumulation_steps"] = 8
 
     run_config["eval_batch_size"] = 4
     if run_config["batch_size"] <= 4:
@@ -274,12 +310,6 @@ def get_training_json(train_info: dict) -> dict:
 
     if not config.get("use_vllm", True):
         run_config["use_vllm"] = False
-
-    if train_info["find_lk_lr"] and allow_find_lk_lr:
-        # get lr from lrs_lookup.py
-        lr = get_grpo_lr(model_name)
-        run_config["learning_rate"] = lr
-    run_config["learning_rate"] = 3.5e-5
 
     run_config["learning_rate"] *= train_info["reg_ratio"]
 

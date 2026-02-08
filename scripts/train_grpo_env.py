@@ -60,7 +60,8 @@ class TrainingArguments(GRPOConfig):
     request_path: Optional[str] = field(default=None)
     use_liger: Optional[bool] = field(default=False)
     disable_fa: Optional[bool] = field(default=False)
-
+    initial_max_turn: Optional[int] = field(default=2)
+    rollouts_per_stage: Optional[int] = field(default=1280)
 
 def print_trainable_parameters(model):
     """
@@ -690,6 +691,9 @@ class ActionMaskedGRPOTrainer(GRPOTrainer):
 
 def main():
     """Format of training requests"""
+    print("--------------------------------")
+    print("TRAINING GRPO ENVIRONMENT")
+    print("--------------------------------")
     argument_parser = transformers.HfArgumentParser((TrainingArguments, ModelConfig))
     training_args, model_args = argument_parser.parse_args_into_dataclasses()
 

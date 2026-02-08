@@ -223,12 +223,6 @@ secrets.json
 wandb/
 mlruns/
 tensorboard_logs/
-scripts/examples/
 scripts/run_py
 scripts/models
 scripts/test_data
-examples/
-scripts/ru*.sh
-run_docker.sh
-run_test.py
-test.py
