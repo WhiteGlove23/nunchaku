@@ -266,6 +266,8 @@ def get_training_json(train_info: dict) -> dict:
     model_architecture = get_model_architecture(model_path)
     param_nums = get_model_num_params(model_name, model_path)
     config = get_grpo_config(param_nums)
+    if model_name == "mistralai/Mistral-7B-Instruct-v0.3":
+        config = GRPO_CONFIG["6_9_b"]
     print(f"config: {config}")
     run_config = {
         "epoch_num": 2,
