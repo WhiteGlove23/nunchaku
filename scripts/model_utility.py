@@ -11,6 +11,7 @@ import torch
 import os
 import json
 import torch
+from transformers import AutoTokenizer
 
 MODEL_CONFIG = {
     "facebook/opt-1.3b": {"model_size": 1_300_000_000},
@@ -24,6 +25,24 @@ MODEL_CONFIG = {
 }
 
 hf_api = HfApi()
+
+
+def is_reasoning_tokenizer(tokenizer: AutoTokenizer) -> bool:
+    try:
+        vocab = tokenizer.get_vocab()
+        
+        pairs = [
+            ('<think>', '</think>'),
+            ('<thinking>', '</thinking>'),
+            ('<reasoning>', '</reasoning>'),
+            ('<thought>', '</thought>'),
+            ('<reflection>', '</reflection>'),
+        ]
+        
+        return any(open_tag in vocab and close_tag in vocab 
+                   for open_tag, close_tag in pairs)
+    except:
+        return False
 
 
 def get_model_architecture(model_path: str) -> str:
@@ -132,10 +151,20 @@ def disable_flash_attention(architecture: str, model: str) -> str:
     # if model == "databricks/dolly-v2-3b":
     #    return "True"
     if architecture.strip().lower() in ["gptneoforcausallm", "bloomforcausallm", "gptossforcausallm"]:
+        return True
+    else:
+        return False
+
+
+def disable_action_mask(model: str) -> str:
+    problematic_bpe_tokenizer_models = [
+        "codellama/CodeLlama-7b-Instruct-hf",
+        "deepseek-ai/deepseek-coder-6.7b-instruct"
+    ]
+    if model in problematic_bpe_tokenizer_models:
         return "True"
     else:
         return "False"
-
 
 def get_use_vllm(architecture: str, model: str) -> str:
     if model in [

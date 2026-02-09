@@ -39,13 +39,14 @@ from trl.models.utils import disable_gradient_checkpointing
 from trl.trainer.utils import use_adapter
 
 from utility import log_info
+from model_utility import is_reasoning_tokenizer
 from alf_world_environment_functions import (
     alfworld_rollout_first_prompt_and_completion_parallelized, alfworld_rollout_full_prompt_and_completion_parallelized,
     alfworld_rollout_reward_func
 )
 from game_world_environment_function import (
     rollout_first_prompt_and_completion as game_world_rollout_first_prompt_and_completion,
-    rollout_full_prompt_and_completion_parallelized as game_world_rollout_full_prompt_and_completion_parallelized,
+    rollout_last_prompt_and_completion_parallelized_curriculum as game_world_rollout_last_prompt_and_completion_parallelized_curriculum,
     rollout_full_prompt_and_completion_parallelized_curriculum as game_world_rollout_full_prompt_and_completion_parallelized_curriculum,
     rollout_reward_func as game_world_rollout_reward_func
 )
@@ -60,6 +61,7 @@ class TrainingArguments(GRPOConfig):
     request_path: Optional[str] = field(default=None)
     use_liger: Optional[bool] = field(default=False)
     disable_fa: Optional[bool] = field(default=False)
+    disable_action_mask: Optional[bool] = field(default=False)
     initial_max_turn: Optional[int] = field(default=2)
     rollouts_per_stage: Optional[int] = field(default=1280)
 
@@ -791,45 +793,75 @@ def main():
     log_info(f"max_steps: {max_steps}")
 
     # # First time rollout use default GRPO trainer
-    # trainer = GRPOTrainer(
-    #     model=model,
-    #     rollout_func=alfworld_rollout_first_prompt_and_completion_parallelized,
-    #     reward_funcs=[alfworld_rollout_reward_func],
-    #     args=training_args,
-    #     train_dataset=train_ds,
-    #     eval_dataset=dev_ds,
-    #     processing_class=tokenizer,
-    #     peft_config=peft_config,
-    #     callbacks=[
-    #         GRPOCustomEvalSaveCallback(
-    #             WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
-    #             train_request["submission_dir"],
-    #             training_args.output_dir,
-    #             train_request["model_name"],
-    #             max_steps
-    #         )
-    #     ],
-    # )
-    
-    # Full prompt and completion rollout use ActionMaskedGRPOTrainer
-    trainer = ActionMaskedGRPOTrainer(
-        model=model,
-        rollout_func=game_world_rollout_full_prompt_and_completion_parallelized_curriculum,
-        reward_funcs=[game_world_rollout_reward_func],
-        args=training_args,
-        train_dataset=train_ds,
-        processing_class=tokenizer,
-        peft_config=peft_config,
-        callbacks=[
-            GRPOCustomEvalSaveCallback(
-                WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
-                train_request["submission_dir"],
-                training_args.output_dir,
-                train_request["model_name"],
-                max_steps
-            )
-        ],
-    )
+    if is_reasoning_tokenizer(tokenizer):
+        print("Training reasoning model with GRPOTrainer")
+        training_args.max_completion_length = 2048
+        training_args.vllm_max_model_length += 2048
+        training_args.initial_max_turn = 1
+        trainer = GRPOTrainer(
+            model=model,
+            rollout_func=game_world_rollout_last_prompt_and_completion_parallelized_curriculum,
+            reward_funcs=[game_world_rollout_reward_func],
+            args=training_args,
+            train_dataset=train_ds,
+            eval_dataset=dev_ds,
+            processing_class=tokenizer,
+            peft_config=peft_config,
+            callbacks=[
+                GRPOCustomEvalSaveCallback(
+                    WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
+                    train_request["submission_dir"],
+                    training_args.output_dir,
+                    train_request["model_name"],
+                    max_steps
+                )
+            ],
+        )
+    elif training_args.disable_action_mask:
+        print("Training reasoning model with GRPOTrainer")
+        training_args.max_completion_length = 16
+        training_args.initial_max_turn = 1
+        trainer = GRPOTrainer(
+            model=model,
+            rollout_func=game_world_rollout_last_prompt_and_completion_parallelized_curriculum,
+            reward_funcs=[game_world_rollout_reward_func],
+            args=training_args,
+            train_dataset=train_ds,
+            eval_dataset=dev_ds,
+            processing_class=tokenizer,
+            peft_config=peft_config,
+            callbacks=[
+                GRPOCustomEvalSaveCallback(
+                    WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
+                    train_request["submission_dir"],
+                    training_args.output_dir,
+                    train_request["model_name"],
+                    max_steps
+                )
+            ],
+        )
+    else:
+        # Full prompt and completion rollout use ActionMaskedGRPOTrainer
+        training_args.max_completion_length = 16
+        print("Training non-reasoning model with ActionMaskedGRPOTrainer")
+        trainer = ActionMaskedGRPOTrainer(
+            model=model,
+            rollout_func=game_world_rollout_full_prompt_and_completion_parallelized_curriculum,
+            reward_funcs=[game_world_rollout_reward_func],
+            args=training_args,
+            train_dataset=train_ds,
+            processing_class=tokenizer,
+            peft_config=peft_config,
+            callbacks=[
+                GRPOCustomEvalSaveCallback(
+                    WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
+                    train_request["submission_dir"],
+                    training_args.output_dir,
+                    train_request["model_name"],
+                    max_steps
+                )
+            ],
+        )
 
     trainer.train()
     

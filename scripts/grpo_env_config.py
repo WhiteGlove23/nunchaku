@@ -3,6 +3,7 @@ from model_utility import (
     get_model_num_params,
     get_use_liger,
     disable_flash_attention,
+    disable_action_mask,
     get_use_vllm,
     get_gradient_checkpointing,
     get_gpu_count,
@@ -67,13 +68,12 @@ GRPO_CONFIG = {
         "vllm_gpu_memory_utilization": 0.4,
         "beta": 0.01,
     },
-    # TODO: change to correct gpu_count = 4
     "6_9_b": {
         "lr": 6e-6,
         "distributed": "ddp",
-        "gpu_count": 2,
+        "gpu_count": 4,
         "batch_size": 2,
-        "gradient_accumulation_steps": 8,
+        "gradient_accumulation_steps": 4,
         "use_lora": True,
         "vllm_gpu_memory_utilization": 0.5,
         "beta": 0.01,
@@ -180,6 +180,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
         "vllm_gpu_memory_utilization",
         "num_generations",
         "disable_fa",
+        "disable_action_mask",
         "beta",
     ]
     for key in required_keys:
@@ -219,11 +220,12 @@ def get_run_cmd(config: dict, gpu_nums: int):
     --optim {optimizer} \
     --use_liger {use_liger} --num_generations {num_generations} --vllm_mode colocate --vllm_gpu_memory_utilization {vllm_gpu_memory_utilization} \
     --disable_fa {disable_fa} \
+    --disable_action_mask {disable_action_mask} \
     --beta {beta} \
     --num_generations {num_generations} \
     --loss_type dr_grpo \
     --do_eval False \
-    --vllm_max_model_len 4225"""
+    --vllm_max_model_length 4225"""
     )
 
     if config.get("use_lora", False):
@@ -274,6 +276,7 @@ def get_training_json(train_info: dict) -> dict:
         "optimizer": "paged_adamw_8bit",
         "use_lora": config.get("use_lora", False),
         "disable_fa": disable_flash_attention(model_architecture, model_name),
+        "disable_action_mask": disable_action_mask(model_name),
         "gpu_nums": config["gpu_count"],
         "output_dir": train_info["output_dir"],
         "request_path": train_info["request_path"],
