@@ -227,7 +227,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
     --num_generations {num_generations} \
     --loss_type dr_grpo \
     --do_eval False \
-    --vllm_max_model_length 4225"""
+    --vllm_max_model_length 5248"""
     )
 
     if config.get("use_lora", False):

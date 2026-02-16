@@ -813,16 +813,18 @@ def main():
         if training_args.environment_name == "goof_spiel":
             rollout_func = goof_spiel_rollout_last_prompt_and_completion_parallelized_curriculum
             reward_func = goof_spiel_rollout_reward_func
+            trainer_class = GRPOTrainer
         elif training_args.environment_name == "gin_rummy":
             rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
             reward_func = gin_rummy_rollout_reward_func
-            training_args.initial_max_turn = 13
+            training_args.initial_max_turn = 5
+            trainer_class = ActionMaskedGRPOTrainer
         
         print("Training reasoning model with GRPOTrainer")
         training_args.max_completion_length = 2048
         training_args.vllm_max_model_length += 2048
         training_args.initial_max_turn = 1
-        trainer = GRPOTrainer(
+        trainer = trainer_class(
             model=model,
             rollout_func=rollout_func,
             reward_funcs=[reward_func],
@@ -845,15 +847,17 @@ def main():
         if training_args.environment_name == "goof_spiel":
             rollout_func = goof_spiel_rollout_last_prompt_and_completion_parallelized_curriculum
             reward_func = goof_spiel_rollout_reward_func
+            trainer_class = GRPOTrainer
         elif training_args.environment_name == "gin_rummy":
             rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
             reward_func = gin_rummy_rollout_reward_func
-            training_args.initial_max_turn = 13
+            training_args.initial_max_turn = 5
+            trainer_class = ActionMaskedGRPOTrainer
         
         print("Training reasoning model with GRPOTrainer")
         training_args.max_completion_length = 16
         training_args.initial_max_turn = 1
-        trainer = GRPOTrainer(
+        trainer = trainer_class(
             model=model,
             rollout_func=rollout_func,
             reward_funcs=[reward_func],
@@ -876,10 +880,12 @@ def main():
         if training_args.environment_name == "goof_spiel":
             rollout_func = goof_spiel_rollout_full_prompt_and_completion_parallelized_curriculum
             reward_func = goof_spiel_rollout_reward_func
+            trainer_class = ActionMaskedGRPOTrainer
         elif training_args.environment_name == "gin_rummy":
             rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
             reward_func = gin_rummy_rollout_reward_func
-            training_args.initial_max_turn = 13
+            training_args.initial_max_turn = 5
+            trainer_class = ActionMaskedGRPOTrainer
             
         # Full prompt and completion rollout use ActionMaskedGRPOTrainer
         training_args.max_completion_length = 16

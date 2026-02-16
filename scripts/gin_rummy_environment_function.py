@@ -623,7 +623,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         # Initialize curriculum scheduler
         rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
             initial_max_turn=trainer.args.initial_max_turn,
-            final_max_turn=13,
+            final_max_turn=15,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             warmup_rollouts=trainer.args.rollouts_per_stage,
         )
