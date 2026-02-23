@@ -559,7 +559,7 @@ class CurriculumScheduler:
         initial_max_turn=1,
         final_max_turn=13,
         rollouts_per_stage=1280,
-        initial_hint_prob=0.75,
+        initial_hint_prob=0.5,
         final_hint_prob=0.0,
         warmup_rollouts=128,
     ):
@@ -678,7 +678,7 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
             initial_max_turn=trainer.args.initial_max_turn,
             final_max_turn=15,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
-            initial_hint_prob=0.75,
+            initial_hint_prob=0.5,
             final_hint_prob=0.0,
             warmup_rollouts=trainer.args.rollouts_per_stage,
         )
@@ -964,7 +964,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             initial_max_turn=trainer.args.initial_max_turn,
             final_max_turn=13,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
-            initial_hint_prob=0.75,
+            initial_hint_prob=0.5,
             final_hint_prob=0.0,
             warmup_rollouts=trainer.args.rollouts_per_stage,
         )
