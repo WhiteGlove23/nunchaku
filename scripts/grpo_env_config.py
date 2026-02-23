@@ -226,7 +226,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
     --beta {beta} \
     --num_generations {num_generations} \
     --loss_type dr_grpo \
-    --steps_per_generation 4 \
+    --steps_per_generation 6 \
     --do_eval False"""
     )
 
