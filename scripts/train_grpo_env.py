@@ -830,7 +830,7 @@ def main():
             elif training_args.environment_name == "gin_rummy":
                 rollout_func = gin_rummy_rollout_last_prompt_and_completion_parallelized_curriculum
                 reward_func = gin_rummy_rollout_reward_func
-                training_args.initial_max_turn = 4
+                training_args.initial_max_turn = 8
                 trainer_class = GRPOTrainer
             
             print("Training reasoning model with GRPOTrainer")
@@ -864,7 +864,7 @@ def main():
             elif training_args.environment_name == "gin_rummy":
                 rollout_func = gin_rummy_rollout_last_prompt_and_completion_parallelized_curriculum
                 reward_func = gin_rummy_rollout_reward_func
-                training_args.initial_max_turn = 4
+                training_args.initial_max_turn = 8
                 trainer_class = GRPOTrainer
             
             print("Training reasoning model with GRPOTrainer")
@@ -896,7 +896,7 @@ def main():
             elif training_args.environment_name == "gin_rummy":
                 rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = gin_rummy_rollout_reward_func
-                training_args.initial_max_turn = 4
+                training_args.initial_max_turn = 8
                 trainer_class = ActionMaskedGRPOTrainer
                 
             # Full prompt and completion rollout use ActionMaskedGRPOTrainer

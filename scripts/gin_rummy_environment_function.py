@@ -375,6 +375,7 @@ class RewardCalculator:
         self.knock_ready_bonus = 20.0
         self.discard_useful_penalty = -2.0
         self.missed_opportunity_penalty = -3.0
+        self.picked_up_useless_upcard_penalty = -3.0
         
         
     def calculate_step_reward(
@@ -470,14 +471,18 @@ class RewardCalculator:
             upcard = prev_state.upcard
             
             if action == '53':  # Drew from stock instead of upcard
+                # Penalize missed opportunity to complete set or run
                 if would_complete_set(prev_state.hand, upcard):
                     reward += self.missed_opportunity_penalty
                 elif would_complete_run(prev_state.hand, upcard):
                     reward += self.missed_opportunity_penalty
-                elif would_improve_set(prev_state.hand, upcard):
-                    reward += self.missed_opportunity_penalty * 0.5
-                elif would_improve_run(prev_state.hand, upcard):
-                    reward += self.missed_opportunity_penalty * 0.5
+            else: # Drew from upcard
+                # Penalize if picked up a not useful upcard, only useful if it completes a set or run
+                if not (
+                    would_complete_set(prev_state.hand, upcard) or 
+                    would_complete_run(prev_state.hand, upcard)
+                ):
+                    reward += self.picked_up_useless_upcard_penalty
         
         # R10: Terminal reward (only added on final step)
         if env_reward != 0:
@@ -676,14 +681,14 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
         # Initialize curriculum scheduler
         rollout_last_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
             initial_max_turn=trainer.args.initial_max_turn,
-            final_max_turn=15,
+            final_max_turn=30,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.5,
             final_hint_prob=0.0,
             warmup_rollouts=trainer.args.rollouts_per_stage,
         )
         
-        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=13, rollouts_per_stage={trainer.args.rollouts_per_stage}, warmup_rollouts={trainer.args.rollouts_per_stage}")
+        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=30, rollouts_per_stage={trainer.args.rollouts_per_stage}, warmup_rollouts={trainer.args.rollouts_per_stage}")
 
     # Retrieve static variables
     rank = rollout_last_prompt_and_completion_parallelized_curriculum.rank
@@ -962,14 +967,14 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         # Initialize curriculum scheduler
         rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
             initial_max_turn=trainer.args.initial_max_turn,
-            final_max_turn=13,
+            final_max_turn=30,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.5,
             final_hint_prob=0.0,
             warmup_rollouts=trainer.args.rollouts_per_stage,
         )
         
-        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=13, rollouts_per_stage={trainer.args.rollouts_per_stage}, warmup_rollouts={trainer.args.rollouts_per_stage}")
+        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=30, rollouts_per_stage={trainer.args.rollouts_per_stage}, warmup_rollouts={trainer.args.rollouts_per_stage}")
 
     # Retrieve static variables
     rank = rollout_full_prompt_and_completion_parallelized_curriculum.rank
