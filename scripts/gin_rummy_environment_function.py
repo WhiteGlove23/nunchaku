@@ -297,6 +297,11 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
             if "Action:" in action_to_send:
                 action_to_send = action_to_send.split("Action:")[-1].strip()
 
+            # Fallback: extract first integer (1+ digits) from text
+            fallback_match = re.search(r"\d+", action_to_send)
+            if fallback_match:
+                action_to_send = fallback_match.group(0)
+
             # --- Step Environment (POST /step) ---
             try:
                 formatted_observation = ""
@@ -575,6 +580,11 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             # Parse ReAct format
             if "Action:" in action_to_send:
                 action_to_send = action_to_send.split("Action:")[-1].strip()
+
+            # Fallback: extract first integer (1+ digits) from text
+            fallback_match = re.search(r"\d+", action_to_send)
+            if fallback_match:
+                action_to_send = fallback_match.group(0)
 
             # --- Step Environment (POST /step) ---
             try:
