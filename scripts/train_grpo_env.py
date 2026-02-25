@@ -51,8 +51,9 @@ from goof_spiel_environment_function import (
     rollout_reward_func as goof_spiel_rollout_reward_func
 )
 from gin_rummy_environment_function import (
-    rollout_first_prompt_and_completion as gin_rummy_rollout_first_prompt_and_completion,
-    rollout_reward_func as gin_rummy_rollout_reward_func
+    rollout_full_prompt_and_completion_parallelized_curriculum as gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum,
+    rollout_reward_func as gin_rummy_rollout_reward_func,
+    rollout_last_prompt_and_completion_parallelized_curriculum as gin_rummy_rollout_last_prompt_and_completion_parallelized_curriculum
 )
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
@@ -712,207 +713,220 @@ def main():
     print("--------------------------------")
     print("TRAINING GRPO ENVIRONMENT")
     print("--------------------------------")
-    argument_parser = transformers.HfArgumentParser((TrainingArguments, ModelConfig))
-    training_args, model_args = argument_parser.parse_args_into_dataclasses()
+    try:
+        argument_parser = transformers.HfArgumentParser((TrainingArguments, ModelConfig))
+        training_args, model_args = argument_parser.parse_args_into_dataclasses()
 
-    train_info = json.load(open(training_args.request_path, "r"))
-    train_request = train_info["train_request"]
-    task_id = train_request["task_id"]
-    
-    output_dir = training_args.output_dir
-    tokenizer = AutoTokenizer.from_pretrained(train_request["model_path"])
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # Limit to at most 200_000 samples to avoid creating too large a dataset
-    start_idx, end_idx = GAMES_TO_TASK_ID_RANGE[training_args.environment_name]
-    max_samples = 200_000
-    total_range = end_idx - start_idx
-    if total_range > max_samples:
-        # evenly sample max_samples task ids from the range
-        selected_indices = sorted(random.sample(range(start_idx, end_idx), max_samples))
-    else:
-        selected_indices = list(range(start_idx, end_idx))
-    train_ds = Dataset.from_list([{"prompt": str(i)} for i in selected_indices])
-    dev_ds = train_ds.select(random.sample(range(len(train_ds)), 10))
-
-    log_info(f"world_size: {training_args.world_size}")
-    total_steps_per_epoch = (
-        len(train_ds)
-        * training_args.num_generations
-        // (
-            training_args.per_device_train_batch_size
-            * training_args.gradient_accumulation_steps
-            * training_args.world_size
-        )
-    )
-
-    log_info(f"total_steps_per_epoch: {total_steps_per_epoch}")
-
-    quantization_config = get_quantization_config(model_args)
-    device_string = "cuda:" + str(LOCAL_RANK)
-    device_map = (
-        get_kbit_device_map()
-        if quantization_config is not None
-        else {"": device_string}
-    )
-    if len(training_args.fsdp) > 0 or is_deepspeed_zero3_enabled():
-        device_map = None
-    
-    model_kwargs = dict(
-        revision=model_args.model_revision,
-        attn_implementation=(
-            "flash_attention_2" if not training_args.disable_fa else "eager"
-        ),
-        torch_dtype=torch.bfloat16,
-        use_cache=False if training_args.gradient_checkpointing else True,
-        device_map=device_map,
-        quantization_config=quantization_config,
-    )
-
-    log_info(f"final training_args: {training_args}")
-
-    if training_args.use_liger:
-        from liger_kernel.transformers import AutoLigerKernelForCausalLM
-
-        model_class = AutoLigerKernelForCausalLM
-    else:
-        model_class = transformers.AutoModelForCausalLM
-
-    model = model_class.from_pretrained(train_request["model_path"], **model_kwargs)
-
-    # some model need to set the generation config or encounter the invalid generation config error
-    set_generation_config(train_request["model_name"], model)
-
-    peft_config = get_peft_config(model_args)
-    if "lora_model" in train_request:
-        model = PeftModelForCausalLM.from_pretrained(
-            model, train_request["lora_model"], is_trainable=True, **model_kwargs
-        )
-
-    if peft_config is None:  # this is full-weight training
-        # some model need to resize the token embeddings or encounter the size mismatch error; only for full-weight models
-        resize_if_needed(train_request["model_name"], model, len(tokenizer))
-
-    # Check if this is the main process and create the output directory
-    if is_main_process(LOCAL_RANK):  # Only create directory on main process
-        os.makedirs(training_args.output_dir, exist_ok=True)
-        log_info(f"Created output directory: {training_args.output_dir}")
-
-    periodic_save_steps = train_request.get("periodic_save_steps", -1)
-    if periodic_save_steps > total_steps_per_epoch:
-        periodic_save_steps = -1
-        log_info(
-            f"The periodic_save_steps ({periodic_save_steps}) is greater than the total_steps_per_epoch ({total_steps_per_epoch}), set periodic_save_steps to -1, do not save the model regularly"
-        )
-    log_info(f"periodic_save_steps: {periodic_save_steps}")
-
-    training_args.save_only_model = True  # only save the model, not the optimizer
- 
-    if training_args.gradient_checkpointing:
-        training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
+        train_info = json.load(open(training_args.request_path, "r"))
+        train_request = train_info["train_request"]
+        task_id = train_request["task_id"]
         
-    print("train_ds.column_names: ", train_ds.column_names)
+        output_dir = training_args.output_dir
+        tokenizer = AutoTokenizer.from_pretrained(train_request["model_path"])
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    max_steps = train_request.get("max_steps", -1)
-    log_info(f"max_steps: {max_steps}")
+        quantization_config = get_quantization_config(model_args)
+        device_string = "cuda:" + str(LOCAL_RANK)
+        device_map = (
+            get_kbit_device_map()
+            if quantization_config is not None
+            else {"": device_string}
+        )
+        if len(training_args.fsdp) > 0 or is_deepspeed_zero3_enabled():
+            device_map = None
 
-    # # First time rollout use default GRPO trainer
-    if is_reasoning_tokenizer(tokenizer):
-        if training_args.environment_name == "goof_spiel":
-            rollout_func = goof_spiel_rollout_last_prompt_and_completion_parallelized_curriculum
-            reward_func = goof_spiel_rollout_reward_func
-        elif training_args.environment_name == "gin_rummy":
-            rollout_func = gin_rummy_rollout_first_prompt_and_completion
-            reward_func = gin_rummy_rollout_reward_func
-            training_args.initial_max_turn = 13
-        
-        print("Training reasoning model with GRPOTrainer")
-        training_args.max_completion_length = 2048
-        training_args.vllm_max_model_length += 2048
-        training_args.initial_max_turn = 1
-        trainer = GRPOTrainer(
-            model=model,
-            rollout_func=rollout_func,
-            reward_funcs=[reward_func],
-            args=training_args,
-            train_dataset=train_ds,
-            eval_dataset=dev_ds,
-            processing_class=tokenizer,
-            peft_config=peft_config,
-            callbacks=[
-                GRPOCustomEvalSaveCallback(
-                    WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
-                    train_request["submission_dir"],
-                    training_args.output_dir,
-                    train_request["model_name"],
-                    max_steps
-                )
-            ],
+        model_kwargs = dict(
+            revision=model_args.model_revision,
+            attn_implementation=(
+                "flash_attention_2" if not training_args.disable_fa else "eager"
+            ),
+            torch_dtype=torch.bfloat16,
+            use_cache=False if training_args.gradient_checkpointing else True,
+            device_map=device_map,
+            quantization_config=quantization_config,
         )
-    elif training_args.disable_action_mask:
-        if training_args.environment_name == "goof_spiel":
-            rollout_func = goof_spiel_rollout_last_prompt_and_completion_parallelized_curriculum
-            reward_func = goof_spiel_rollout_reward_func
-        elif training_args.environment_name == "gin_rummy":
-            rollout_func = gin_rummy_rollout_first_prompt_and_completion
-            reward_func = gin_rummy_rollout_reward_func
-            training_args.initial_max_turn = 13
-        
-        print("Training reasoning model with GRPOTrainer")
-        training_args.max_completion_length = 16
-        training_args.initial_max_turn = 1
-        trainer = GRPOTrainer(
-            model=model,
-            rollout_func=rollout_func,
-            reward_funcs=[reward_func],
-            args=training_args,
-            train_dataset=train_ds,
-            eval_dataset=dev_ds,
-            processing_class=tokenizer,
-            peft_config=peft_config,
-            callbacks=[
-                GRPOCustomEvalSaveCallback(
-                    WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
-                    train_request["submission_dir"],
-                    training_args.output_dir,
-                    train_request["model_name"],
-                    max_steps
-                )
-            ],
-        )
-    else:
-        if training_args.environment_name == "goof_spiel":
-            rollout_func = goof_spiel_rollout_full_prompt_and_completion_parallelized_curriculum
-            reward_func = goof_spiel_rollout_reward_func
-        elif training_args.environment_name == "gin_rummy":
-            rollout_func = gin_rummy_rollout_first_prompt_and_completion
-            reward_func = gin_rummy_rollout_reward_func
-            training_args.initial_max_turn = 13
+
+        log_info(f"final training_args: {training_args}")
+
+        if training_args.use_liger:
+            from liger_kernel.transformers import AutoLigerKernelForCausalLM
+
+            model_class = AutoLigerKernelForCausalLM
+        else:
+            model_class = transformers.AutoModelForCausalLM
+
+        model = model_class.from_pretrained(train_request["model_path"], **model_kwargs)
+
+        # some model need to set the generation config or encounter the invalid generation config error
+        set_generation_config(train_request["model_name"], model)
+
+        peft_config = get_peft_config(model_args)
+        if "lora_model" in train_request:
+            model = PeftModelForCausalLM.from_pretrained(
+                model, train_request["lora_model"], is_trainable=True, **model_kwargs
+            )
+
+        if peft_config is None:  # this is full-weight training
+            # some model need to resize the token embeddings or encounter the size mismatch error; only for full-weight models
+            resize_if_needed(train_request["model_name"], model, len(tokenizer))
+
+        # Check if this is the main process and create the output directory
+        if is_main_process(LOCAL_RANK):  # Only create directory on main process
+            os.makedirs(training_args.output_dir, exist_ok=True)
+            log_info(f"Created output directory: {training_args.output_dir}")
             
-        # Full prompt and completion rollout use ActionMaskedGRPOTrainer
-        training_args.max_completion_length = 16
-        print("Training non-reasoning model with ActionMaskedGRPOTrainer")
-        trainer = ActionMaskedGRPOTrainer(
-            model=model,
-            rollout_func=rollout_func,
-            reward_funcs=[reward_func],
-            args=training_args,
-            train_dataset=train_ds,
-            processing_class=tokenizer,
-            peft_config=peft_config,
-            callbacks=[
-                GRPOCustomEvalSaveCallback(
-                    WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
-                    train_request["submission_dir"],
-                    training_args.output_dir,
-                    train_request["model_name"],
-                    max_steps
-                )
-            ],
+        # Limit to at most 200_000 samples to avoid creating too large a dataset
+        start_idx, end_idx = GAMES_TO_TASK_ID_RANGE[training_args.environment_name]
+        max_samples = 200_000
+        total_range = end_idx - start_idx
+        if total_range > max_samples:
+            # evenly sample max_samples task ids from the range
+            selected_indices = sorted(random.sample(range(start_idx, end_idx), max_samples))
+        else:
+            selected_indices = list(range(start_idx, end_idx))
+        train_ds = Dataset.from_list([{"prompt": str(i)} for i in selected_indices])
+        dev_ds = train_ds.select(random.sample(range(len(train_ds)), 10))
+
+        log_info(f"world_size: {training_args.world_size}")
+        total_steps_per_epoch = (
+            len(train_ds)
+            * training_args.num_generations
+            // (
+                training_args.per_device_train_batch_size
+                * training_args.gradient_accumulation_steps
+                * training_args.world_size
+            )
         )
 
-    trainer.train()
+        log_info(f"total_steps_per_epoch: {total_steps_per_epoch}")
+
+        periodic_save_steps = train_request.get("periodic_save_steps", -1)
+        if periodic_save_steps > total_steps_per_epoch:
+            periodic_save_steps = -1
+            log_info(
+                f"The periodic_save_steps ({periodic_save_steps}) is greater than the total_steps_per_epoch ({total_steps_per_epoch}), set periodic_save_steps to -1, do not save the model regularly"
+            )
+        log_info(f"periodic_save_steps: {periodic_save_steps}")
+
+        training_args.save_only_model = True  # only save the model, not the optimizer
+    
+        if training_args.gradient_checkpointing:
+            training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
+            
+        print("train_ds.column_names: ", train_ds.column_names)
+
+        max_steps = train_request.get("max_steps", -1)
+        log_info(f"max_steps: {max_steps}")
+
+        # # First time rollout use default GRPO trainer
+        if is_reasoning_tokenizer(tokenizer):
+            print(f"Training reasoning model with GRPOTrainer")
+            if training_args.environment_name == "goof_spiel":
+                rollout_func = goof_spiel_rollout_last_prompt_and_completion_parallelized_curriculum
+                reward_func = goof_spiel_rollout_reward_func
+                training_args.initial_max_turn = 1
+                trainer_class = GRPOTrainer
+            elif training_args.environment_name == "gin_rummy":
+                rollout_func = gin_rummy_rollout_last_prompt_and_completion_parallelized_curriculum
+                reward_func = gin_rummy_rollout_reward_func
+                training_args.initial_max_turn = 8
+                trainer_class = GRPOTrainer
+            
+            print("Training reasoning model with GRPOTrainer")
+            training_args.max_completion_length = 2048
+            training_args.vllm_max_model_length += 2048
+            trainer = trainer_class(
+                model=model,
+                rollout_func=rollout_func,
+                reward_funcs=[reward_func],
+                args=training_args,
+                train_dataset=train_ds,
+                eval_dataset=dev_ds,
+                processing_class=tokenizer,
+                peft_config=peft_config,
+                callbacks=[
+                    GRPOCustomEvalSaveCallback(
+                        WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
+                        train_request["submission_dir"],
+                        training_args.output_dir,
+                        train_request["model_name"],
+                        max_steps
+                    )
+                ],
+            )
+        elif training_args.disable_action_mask:
+            if training_args.environment_name == "goof_spiel":
+                rollout_func = goof_spiel_rollout_last_prompt_and_completion_parallelized_curriculum
+                reward_func = goof_spiel_rollout_reward_func
+                training_args.initial_max_turn = 1
+                trainer_class = GRPOTrainer
+            elif training_args.environment_name == "gin_rummy":
+                rollout_func = gin_rummy_rollout_last_prompt_and_completion_parallelized_curriculum
+                reward_func = gin_rummy_rollout_reward_func
+                training_args.initial_max_turn = 8
+                trainer_class = GRPOTrainer
+            
+            print("Training reasoning model with GRPOTrainer")
+            training_args.max_completion_length = 16
+            trainer = trainer_class(
+                model=model,
+                rollout_func=rollout_func,
+                reward_funcs=[reward_func],
+                args=training_args,
+                train_dataset=train_ds,
+                eval_dataset=dev_ds,
+                processing_class=tokenizer,
+                peft_config=peft_config,
+                callbacks=[
+                    GRPOCustomEvalSaveCallback(
+                        WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
+                        train_request["submission_dir"],
+                        training_args.output_dir,
+                        train_request["model_name"],
+                        max_steps
+                    )
+                ],
+            )
+        else:
+            if training_args.environment_name == "goof_spiel":
+                rollout_func = goof_spiel_rollout_full_prompt_and_completion_parallelized_curriculum
+                reward_func = goof_spiel_rollout_reward_func
+                trainer_class = ActionMaskedGRPOTrainer
+            elif training_args.environment_name == "gin_rummy":
+                rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
+                reward_func = gin_rummy_rollout_reward_func
+                training_args.initial_max_turn = 8
+                trainer_class = ActionMaskedGRPOTrainer
+                
+            # Full prompt and completion rollout use ActionMaskedGRPOTrainer
+            training_args.max_completion_length = 16
+            print("Training non-reasoning model with ActionMaskedGRPOTrainer")
+            trainer = ActionMaskedGRPOTrainer(
+                model=model,
+                rollout_func=rollout_func,
+                reward_funcs=[reward_func],
+                args=training_args,
+                train_dataset=train_ds,
+                processing_class=tokenizer,
+                peft_config=peft_config,
+                callbacks=[
+                    GRPOCustomEvalSaveCallback(
+                        WhenToEvalHandler(train_request["end_time"], train_request["save_before_remaining_time"], periodic_save_steps=periodic_save_steps, steps_per_epoch=total_steps_per_epoch, max_steps=max_steps),
+                        train_request["submission_dir"],
+                        training_args.output_dir,
+                        train_request["model_name"],
+                        max_steps
+                    )
+                ],
+            )
+
+        trainer.train()
+    except Exception as e:
+        import traceback
+        print(f"Error training: {e}")
+        print(traceback.format_exc())
+        raise e
     
     if is_main_process(LOCAL_RANK):
         with open(os.path.join(training_args.output_dir, "success.txt"), "w") as f:
