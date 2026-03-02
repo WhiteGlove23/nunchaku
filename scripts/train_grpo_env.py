@@ -84,6 +84,8 @@ class TrainingArguments(GRPOConfig):
     disable_action_mask: Optional[bool] = field(default=False)
     initial_max_turn: Optional[int] = field(default=2)
     rollouts_per_stage: Optional[int] = field(default=1280)
+    rollout_warmup_rollouts: Optional[int] = field(default=None)
+    mcts_warmup_optimizer_steps: Optional[int] = field(default=None)
     environment_name: Optional[str] = field(default=None)
 
 def print_trainable_parameters(model):
@@ -826,9 +828,22 @@ def main():
             training_args.max_steps = int(max_steps)
             log_info(f"Applied training_args.max_steps: {training_args.max_steps}")
 
+        if (
+            training_args.environment_name == "gin_rummy"
+            and training_args.use_vllm
+            and training_args.vllm_importance_sampling_correction
+            and training_args.vllm_importance_sampling_mode in ("sequence_mask", "sequence_truncate")
+        ):
+            prev_mode = training_args.vllm_importance_sampling_mode
+            training_args.vllm_importance_sampling_mode = "token_truncate"
+            log_info(
+                f"Switched vLLM IS mode for gin_rummy: {prev_mode} -> "
+                f"{training_args.vllm_importance_sampling_mode}"
+            )
+
         # # First time rollout use default GRPO trainer
         if is_reasoning_tokenizer(tokenizer):
-            print(f"Training reasoning model with GRPOTrainer")
+            print("Training reasoning tokenizer model")
             if training_args.environment_name == "goof_spiel":
                 rollout_func = goof_spiel_rollout_last_prompt_and_completion_parallelized_curriculum
                 reward_func = goof_spiel_rollout_reward_func
@@ -838,7 +853,7 @@ def main():
                 rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = gin_rummy_rollout_reward_func
                 training_args.initial_max_turn = 50
-                trainer_class = GRPOTrainer
+                trainer_class = ActionMaskedGRPOTrainer
             # elif training_args.environment_name == "liars_dice":
             #     rollout_func = liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum
             #     reward_func = liars_dice_rollout_reward_func
@@ -846,7 +861,7 @@ def main():
             else:
                 raise ValueError(f"Unsupported environment_name: {training_args.environment_name}")
             
-            print("Training reasoning model with GRPOTrainer")
+            print(f"Training reasoning model with {trainer_class.__name__}")
             training_args.max_completion_length = 2048
             training_args.vllm_max_model_length += 2048
             trainer = trainer_class(

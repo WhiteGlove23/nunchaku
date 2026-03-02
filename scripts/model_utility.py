@@ -28,21 +28,23 @@ hf_api = HfApi()
 
 
 def is_reasoning_tokenizer(tokenizer: AutoTokenizer) -> bool:
-    try:
-        vocab = tokenizer.get_vocab()
+    # TODO: Reasoning model training path is not working correctly
+    # try:
+    #     vocab = tokenizer.get_vocab()
         
-        pairs = [
-            ('<think>', '</think>'),
-            ('<thinking>', '</thinking>'),
-            ('<reasoning>', '</reasoning>'),
-            ('<thought>', '</thought>'),
-            ('<reflection>', '</reflection>'),
-        ]
+    #     pairs = [
+    #         ('<think>', '</think>'),
+    #         ('<thinking>', '</thinking>'),
+    #         ('<reasoning>', '</reasoning>'),
+    #         ('<thought>', '</thought>'),
+    #         ('<reflection>', '</reflection>'),
+    #     ]
         
-        return any(open_tag in vocab and close_tag in vocab 
-                   for open_tag, close_tag in pairs)
-    except:
-        return False
+    #     return any(open_tag in vocab and close_tag in vocab 
+    #                for open_tag, close_tag in pairs)
+    # except:
+    #     return False
+    return False
 
 
 def get_model_architecture(model_path: str) -> str:

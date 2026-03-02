@@ -386,7 +386,20 @@ def remove_reasoning_tags(text: str) -> str:
 
     cleaned = re.sub(r"\n\s*\n\s*\n", "\n\n", cleaned)
     return cleaned.strip()
-    
+
+
+def extract_action_id(completion_text: str) -> str:
+    """
+    Extract a clean numeric action ID from model completion text.
+    """
+    cleaned = remove_reasoning_tags(completion_text)
+    if cleaned.endswith("</s>"):
+        cleaned = cleaned[:-5].strip()
+    if "Action:" in cleaned:
+        cleaned = cleaned.split("Action:")[-1].strip()
+    match = re.search(r"-?\d+", cleaned)
+    return match.group(0) if match else cleaned.strip()
+
     
 class CurriculumScheduler:
     """
@@ -399,20 +412,24 @@ class CurriculumScheduler:
         rollouts_per_stage=1280,
         initial_hint_prob=0.8,
         final_hint_prob=0.0,
+        hint_decay_optimizer_steps=100,
         warmup_rollouts=128,
-        initial_mcts_sims=25,
+        mcts_warmup_optimizer_steps=None,
+        initial_mcts_sims=5,
         final_mcts_sims=25,
-        mcts_ramp_rollouts=None,
     ):
         self.initial_max_turn = initial_max_turn
         self.final_max_turn = final_max_turn
         self.rollouts_per_stage = rollouts_per_stage
         self.initial_hint_prob = initial_hint_prob
         self.final_hint_prob = final_hint_prob
+        self.hint_decay_optimizer_steps = hint_decay_optimizer_steps
         self.warmup_rollouts = warmup_rollouts
+        self.mcts_warmup_optimizer_steps = (
+            0 if mcts_warmup_optimizer_steps is None else mcts_warmup_optimizer_steps
+        )
         self.initial_mcts_sims = initial_mcts_sims
         self.final_mcts_sims = final_mcts_sims
-        self.mcts_ramp_rollouts = mcts_ramp_rollouts or (10 * rollouts_per_stage)
 
         self.total_rollouts = 0
         
@@ -433,45 +450,39 @@ class CurriculumScheduler:
         )
         return current_max_turn
     
-    def _get_progress(self):
-        """Get training progress [0, 1] based on rollouts past warmup."""
-        if self.total_rollouts < self.warmup_rollouts:
-            return 0.0
-        total_stages = self.final_max_turn - self.initial_max_turn
-        if total_stages <= 0:
-            total_decay_rollouts = 10 * self.rollouts_per_stage
-        else:
-            total_decay_rollouts = total_stages * self.rollouts_per_stage
-        adjusted_rollouts = self.total_rollouts - self.warmup_rollouts
-        return min(adjusted_rollouts / total_decay_rollouts, 1.0)
-
-    def get_hint_prob(self):
-        """Calculate current hint probability based on curriculum."""
-        if self.total_rollouts < self.warmup_rollouts:
-            return self.initial_hint_prob
-        progress = self._get_progress()
-        current_prob = self.initial_hint_prob - progress * (self.initial_hint_prob - self.final_hint_prob)
+    def get_hint_prob(self, optimizer_step: Optional[int] = None):
+        """Calculate current hint probability from optimizer-step progress."""
+        current_step = 0 if optimizer_step is None else optimizer_step
+        if self.hint_decay_optimizer_steps <= 0:
+            return self.final_hint_prob
+        progress = min(max(current_step, 0) / self.hint_decay_optimizer_steps, 1.0)
+        current_prob = self.initial_hint_prob - progress * (
+            self.initial_hint_prob - self.final_hint_prob
+        )
         return max(current_prob, self.final_hint_prob)
 
-    def get_mcts_sims(self):
+    def get_mcts_sims(self, optimizer_step: Optional[int] = None):
         """Calculate current MCTS simulations based on curriculum progress."""
-        if self.total_rollouts < self.warmup_rollouts:
-            return self.initial_mcts_sims
-        adjusted_rollouts = self.total_rollouts - self.warmup_rollouts
-        progress = min(adjusted_rollouts / self.mcts_ramp_rollouts, 1.0)
-        return int(self.initial_mcts_sims + progress * (self.final_mcts_sims - self.initial_mcts_sims))
+        current_step = 0 if optimizer_step is None else optimizer_step
+        if self.mcts_warmup_optimizer_steps <= 0:
+            return self.final_mcts_sims
+        progress = min(max(current_step, 0) / self.mcts_warmup_optimizer_steps, 1.0)
+        return int(
+            self.initial_mcts_sims
+            + progress * (self.final_mcts_sims - self.initial_mcts_sims)
+        )
 
     def step(self, num_rollouts=1):
         """Increment rollout counter."""
         self.total_rollouts += num_rollouts
 
-    def get_status(self):
+    def get_status(self, optimizer_step: Optional[int] = None):
         """Get current curriculum status for logging."""
         return {
             "total_rollouts": self.total_rollouts,
             "max_turn": self.get_max_turn(),
-            "hint_prob": self.get_hint_prob(),
-            "mcts_sims": self.get_mcts_sims(),
+            "hint_prob": self.get_hint_prob(optimizer_step),
+            "mcts_sims": self.get_mcts_sims(optimizer_step),
         }
         
 
@@ -528,7 +539,17 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
         rollout_last_prompt_and_completion_parallelized_curriculum.generation_semaphore = Semaphore(1)
         rollout_last_prompt_and_completion_parallelized_curriculum.games_to_task_id_range = games_to_task_id_range
         rollout_last_prompt_and_completion_parallelized_curriculum.selected_game = selected_game
-        
+
+        rollout_warmup_rollouts = (
+            trainer.args.rollout_warmup_rollouts
+            if getattr(trainer.args, "rollout_warmup_rollouts", None) is not None
+            else trainer.args.rollouts_per_stage
+        )
+        mcts_warmup_optimizer_steps = getattr(
+            trainer.args, "mcts_warmup_optimizer_steps", None
+        )
+        hint_decay_optimizer_steps = 100
+
         # Initialize curriculum scheduler
         rollout_last_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
             initial_max_turn=50,
@@ -536,12 +557,21 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.5,
             final_hint_prob=0.0,
-            warmup_rollouts=trainer.args.rollouts_per_stage,
-            initial_mcts_sims=5,
+            hint_decay_optimizer_steps=hint_decay_optimizer_steps,
+            warmup_rollouts=rollout_warmup_rollouts,
+            mcts_warmup_optimizer_steps=mcts_warmup_optimizer_steps,
+            initial_mcts_sims=25,
             final_mcts_sims=25,
         )
 
-        print(f"[CURRICULUM] Initialized with initial_max_turn={50}, final_max_turn=50, rollouts_per_stage={trainer.args.rollouts_per_stage}, warmup_rollouts={trainer.args.rollouts_per_stage}, mcts_sims=5->25")
+        print(
+            f"[CURRICULUM] Initialized with initial_max_turn={50}, final_max_turn={50}, "
+            f"rollouts_per_stage={trainer.args.rollouts_per_stage}, "
+            f"rollout_warmup_rollouts={rollout_warmup_rollouts}, "
+            f"hint_decay_optimizer_steps={hint_decay_optimizer_steps}, "
+            f"mcts_warmup_optimizer_steps={mcts_warmup_optimizer_steps}, "
+            f"mcts_sims=25->25 (constant)"
+        )
 
     # Retrieve static variables
     rank = rollout_last_prompt_and_completion_parallelized_curriculum.rank
@@ -556,10 +586,14 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
     
     # Get current curriculum parameters
     total_rollouts = curriculum.total_rollouts
+    current_optimizer_step = getattr(getattr(trainer, "state", None), "global_step", 0)
     current_max_turn = curriculum.get_max_turn()
-    current_hint_prob = curriculum.get_hint_prob()
-    current_mcts_sims = curriculum.get_mcts_sims()
-    print(f"[CURRICULUM] Rollout {total_rollouts}: max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}, mcts_sims={current_mcts_sims}")
+    current_hint_prob = curriculum.get_hint_prob(current_optimizer_step)
+    current_mcts_sims = curriculum.get_mcts_sims(current_optimizer_step)
+    print(
+        f"[CURRICULUM] Rollout {total_rollouts}, step {current_optimizer_step}: "
+        f"max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}, mcts_sims={current_mcts_sims}"
+    )
 
     def run_single_prompt(index: int, prompt: str):
         # Generate a random game_id for this episode
@@ -631,13 +665,7 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
             messages.append({"role": "assistant", "content": completion_text})
 
             # --- Parse Action ---
-            action_to_send = remove_reasoning_tags(completion_text)
-            if action_to_send.endswith("</s>"):
-                action_to_send = action_to_send[:-5]
-
-            # Parse ReAct format
-            if "Action:" in action_to_send:
-                action_to_send = action_to_send.split("Action:")[-1].strip()
+            action_to_send = extract_action_id(completion_text)
 
             # --- Step Environment (POST /step) ---
             try:
@@ -813,7 +841,17 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         rollout_full_prompt_and_completion_parallelized_curriculum.generation_semaphore = Semaphore(1)
         rollout_full_prompt_and_completion_parallelized_curriculum.games_to_task_id_range = games_to_task_id_range
         rollout_full_prompt_and_completion_parallelized_curriculum.selected_game = selected_game
-        
+
+        rollout_warmup_rollouts = (
+            trainer.args.rollout_warmup_rollouts
+            if getattr(trainer.args, "rollout_warmup_rollouts", None) is not None
+            else trainer.args.rollouts_per_stage
+        )
+        mcts_warmup_optimizer_steps = getattr(
+            trainer.args, "mcts_warmup_optimizer_steps", None
+        )
+        hint_decay_optimizer_steps = 100
+
         # Initialize curriculum scheduler
         rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
             initial_max_turn=50,
@@ -821,12 +859,21 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.5,
             final_hint_prob=0.0,
-            warmup_rollouts=trainer.args.rollouts_per_stage,
-            initial_mcts_sims=5,
+            hint_decay_optimizer_steps=hint_decay_optimizer_steps,
+            warmup_rollouts=rollout_warmup_rollouts,
+            mcts_warmup_optimizer_steps=mcts_warmup_optimizer_steps,
+            initial_mcts_sims=25,
             final_mcts_sims=25,
         )
 
-        print(f"[CURRICULUM] Initialized with initial_max_turn={50}, final_max_turn=50, rollouts_per_stage={trainer.args.rollouts_per_stage}, warmup_rollouts={trainer.args.rollouts_per_stage}, mcts_sims=5->25")
+        print(
+            f"[CURRICULUM] Initialized with initial_max_turn={50}, final_max_turn={50}, "
+            f"rollouts_per_stage={trainer.args.rollouts_per_stage}, "
+            f"rollout_warmup_rollouts={rollout_warmup_rollouts}, "
+            f"hint_decay_optimizer_steps={hint_decay_optimizer_steps}, "
+            f"mcts_warmup_optimizer_steps={mcts_warmup_optimizer_steps}, "
+            f"mcts_sims=25->25 (constant)"
+        )
 
     # Retrieve static variables
     rank = rollout_full_prompt_and_completion_parallelized_curriculum.rank
@@ -841,10 +888,14 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
     
     # Get current curriculum parameters
     total_rollouts = curriculum.total_rollouts
+    current_optimizer_step = getattr(getattr(trainer, "state", None), "global_step", 0)
     current_max_turn = curriculum.get_max_turn()
-    current_hint_prob = curriculum.get_hint_prob()
-    current_mcts_sims = curriculum.get_mcts_sims()
-    print(f"[CURRICULUM] Rollout {total_rollouts}: max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}, mcts_sims={current_mcts_sims}")
+    current_hint_prob = curriculum.get_hint_prob(current_optimizer_step)
+    current_mcts_sims = curriculum.get_mcts_sims(current_optimizer_step)
+    print(
+        f"[CURRICULUM] Rollout {total_rollouts}, step {current_optimizer_step}: "
+        f"max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}, mcts_sims={current_mcts_sims}"
+    )
 
     def run_single_prompt(index: int, prompt: str):
         # Generate a random game_id for this episode
@@ -916,6 +967,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             completion_ids = rollout_outputs.get("completion_ids", [])
             logprobs = rollout_outputs.get("logprobs", [])
             completion_text = tokenizer.decode(completion_ids, skip_special_tokens=True).strip()
+            action_to_send = extract_action_id(completion_text)
 
             # Check if prompt exceeds max length - end episode early to prevent context overflow
             if len(prompt_ids) > MAX_PROMPT_LEN:
@@ -953,15 +1005,6 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
                 if prev_full_ids is not None:
                     prev_full_ids = prev_full_ids + completion_ids
             messages.append({"role": "assistant", "content": completion_text})
-
-            # --- Parse Action ---
-            action_to_send = completion_text
-            if action_to_send.endswith("</s>"):
-                action_to_send = action_to_send[:-5]
-
-            # Parse ReAct format
-            if "Action:" in action_to_send:
-                action_to_send = action_to_send.split("Action:")[-1].strip()
 
             # --- Step Environment (POST /step) ---
             try:

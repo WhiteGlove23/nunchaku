@@ -50,16 +50,18 @@ GRPO_CONFIG = {
         "rollouts_per_stage": 1280,
     },
     "4_5_b": {
-        "lr": 6e-6,
+        "lr": 5e-5,
         "distributed": "ddp",
         "gpu_count": 2,
-        "batch_size": 2,
-        "gradient_accumulation_steps": 8,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 16,
         "use_lora": True,
         "vllm_gpu_memory_utilization": 0.35,  # Reduced for Gin Rummy
         "beta": 0.01,
-        "num_generations": 4,
+        "num_generations": 8,
         "rollouts_per_stage": 1280,
+        "rollout_warmup_rollouts": 0,
+        "mcts_warmup_optimizer_steps": 20,
     },
     "5_6_b": {
         "lr": 6e-6,
@@ -247,6 +249,8 @@ def get_run_cmd(config: dict, gpu_nums: int):
     else:
         template += " --use_vllm False"
 
+    template += f" --log_completions False"
+
     if run_type == "ds":
         template = template + """ --deepspeed ds_config/zero3.json"""
 
@@ -266,6 +270,10 @@ def get_run_cmd(config: dict, gpu_nums: int):
         template = template + f" --initial_max_turn {config.get('initial_max_turn', 2)}"
     if config.get("rollouts_per_stage", 1280) != 1280:
         template = template + f" --rollouts_per_stage {config.get('rollouts_per_stage', 1280)}"
+    if config.get("rollout_warmup_rollouts") is not None:
+        template = template + f" --rollout_warmup_rollouts {config.get('rollout_warmup_rollouts')}"
+    if config.get("mcts_warmup_optimizer_steps") is not None:
+        template = template + f" --mcts_warmup_optimizer_steps {config.get('mcts_warmup_optimizer_steps')}"
         
     print(f"template: {template}", flush=True)
     return template
@@ -304,7 +312,10 @@ def get_training_json(train_info: dict) -> dict:
         "num_generations": config.get("num_generations", 4),
         "initial_max_turn": config.get("initial_max_turn", 2),
         "rollouts_per_stage": config.get("rollouts_per_stage", 1280),
+        "rollout_warmup_rollouts": config.get("rollout_warmup_rollouts"),
+        "mcts_warmup_optimizer_steps": config.get("mcts_warmup_optimizer_steps"),
         "environment_name": train_info.get("dataset_type", {}).get("environment_name"),
+        "log_completions": config.get("log_completions", True),
     }
 
     if model_name == "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5":

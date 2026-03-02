@@ -37,7 +37,7 @@ TASK_ID="1"
 
 # List of models to test (add or remove models as needed)
 MODELS=(
-  "Qwen/Qwen2.5-3B-Instruct"
+  "Qwen/Qwen3-4B-Instruct-2507"
 )
 
 DATASET="https://huggingface.co/datasets/TuringEnterprises/Turing-Open-Reasoning/resolve/main/Computational_STEM_QA_Dataset.json?download=true"
@@ -46,6 +46,7 @@ DATASET_TYPE='{
 }'
 FILE_FORMAT="s3"
 HOURS_TO_COMPLETE=3
+PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # For uploading the outputs
 HUGGINGFACE_TOKEN=""
@@ -135,6 +136,7 @@ for MODEL in "${MODELS[@]}"; do
     --ipc=host \
     -e ENVIRONMENT_SERVER_URLS="$ENVIRONMENT_SERVER_URLS" \
     -e WANDB_TOKEN="$WANDB_TOKEN" \
+    -e PYTORCH_CUDA_ALLOC_CONF="$PYTORCH_CUDA_ALLOC_CONF" \
     "$TRAINER_IMAGE" \
     --task-id "$TASK_ID" \
     --model "$MODEL" \
@@ -144,7 +146,8 @@ for MODEL in "${MODELS[@]}"; do
     --file-format "$FILE_FORMAT" \
     --hours-to-complete "$HOURS_TO_COMPLETE" \
     --expected-repo-name "$LOCAL_EXPECTED_REPO_NAME" \
-    --wandb-mode "online"
+    --wandb-mode "online" \
+    --max-steps 150
 
   TRAIN_CONTAINER_STATUS=0
   

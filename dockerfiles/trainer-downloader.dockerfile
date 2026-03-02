@@ -1,11 +1,11 @@
 FROM python:3.10-slim
 
-WORKDIR /app
+WORKDIR /workspace
 
 RUN pip install --no-cache-dir huggingface_hub aiohttp pydantic transformers
 
 COPY scripts/ scripts/
 
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/workspace/scripts
 
-ENTRYPOINT ["python", "scripts\trainer_downloader.py"]
+ENTRYPOINT ["python", "scripts/trainer_downloader.py"]
