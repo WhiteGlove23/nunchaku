@@ -38,7 +38,7 @@ GRPO_CONFIG = {
         "rollouts_per_stage": 1280,
     },
     "2_4_b": {
-        "lr": 5e-5,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -52,7 +52,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "4_5_b": {
-        "lr": 5e-5,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -66,7 +66,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "5_6_b": {
-        "lr": 5e-5,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -80,11 +80,11 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "6_9_b": {
-        "lr": 5e-5,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 4,
         "batch_size": 1,
-        "gradient_accumulation_steps": 8,
+        "gradient_accumulation_steps": 16,
         "use_lora": True,
         "vllm_gpu_memory_utilization": 0.35,  # Reduced for Gin Rummy (longer episodes = more KV cache)
         "beta": 0.01,
