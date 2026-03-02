@@ -48,6 +48,8 @@ GRPO_CONFIG = {
         "beta": 0.01,
         "num_generations": 8,
         "rollouts_per_stage": 1280,
+        "rollout_warmup_rollouts": 0,
+        "mcts_warmup_optimizer_steps": 20,
     },
     "4_5_b": {
         "lr": 5e-5,
