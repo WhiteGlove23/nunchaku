@@ -893,12 +893,12 @@ def main():
             elif training_args.environment_name == "gin_rummy":
                 rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = gin_rummy_rollout_reward_func
-                training_args.initial_max_turn = 30
+                training_args.initial_max_turn = 5
                 trainer_class = GRPOTrainer
             elif training_args.environment_name == "liars_dice":
                 rollout_func = liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = liars_dice_rollout_reward_func
-                trainer_class = ActionMaskedGRPOTrainer
+                trainer_class = GRPOTrainer
             else:
                 raise ValueError(f"Unsupported environment_name: {training_args.environment_name}")
             

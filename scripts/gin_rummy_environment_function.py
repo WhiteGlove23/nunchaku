@@ -558,7 +558,7 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
 
         # Initialize curriculum scheduler
         rollout_last_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
-            initial_max_turn=30,
+            initial_max_turn=trainer.args.initial_max_turn,
             final_max_turn=30,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.5,
@@ -571,7 +571,7 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
         )
 
         print(
-            f"[CURRICULUM] Initialized with initial_max_turn={30}, final_max_turn={30}, "
+            f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn={30}, "
             f"rollouts_per_stage={trainer.args.rollouts_per_stage}, "
             f"rollout_warmup_rollouts={rollout_warmup_rollouts}, "
             f"hint_decay_optimizer_steps={hint_decay_optimizer_steps}, "
@@ -860,7 +860,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
 
         # Initialize curriculum scheduler
         rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
-            initial_max_turn=30,
+            initial_max_turn=trainer.args.initial_max_turn,
             final_max_turn=30,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.5,
@@ -873,7 +873,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         )
 
         print(
-            f"[CURRICULUM] Initialized with initial_max_turn={30}, final_max_turn={30}, "
+            f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn={30}, "
             f"rollouts_per_stage={trainer.args.rollouts_per_stage}, "
             f"rollout_warmup_rollouts={rollout_warmup_rollouts}, "
             f"hint_decay_optimizer_steps={hint_decay_optimizer_steps}, "
