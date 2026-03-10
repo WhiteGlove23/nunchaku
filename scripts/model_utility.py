@@ -161,7 +161,9 @@ def disable_flash_attention(architecture: str, model: str) -> str:
 def disable_action_mask(model: str) -> str:
     problematic_bpe_tokenizer_models = [
         "codellama/CodeLlama-7b-Instruct-hf",
-        "deepseek-ai/deepseek-coder-6.7b-instruct"
+        "deepseek-ai/deepseek-coder-6.7b-instruct",
+        "mistralai/Mistral-7B-Instruct-v0.3",
+        "mistralai/Mistral-7B-Instruct-v0.2",
     ]
     if model in problematic_bpe_tokenizer_models:
         return "True"

@@ -29,16 +29,15 @@ MAX_PROMPT_LEN = 16384 - 512
 
 MCTS_CONFIG = {
     "opponent": "mcts",
-    "mcts_max_simulations": 25,
+    "mcts_max_simulations": 50,
     "mcts_num_rollouts": 1,
 }
 
 # Reward settings
 INVALID_ACTION_PENALTY = 0.10
-NOOP_PENALTY = 0.03
-TRUNCATION_PENALTY = 0.20
-CALL_QUALITY_BONUS = 0.08
-CALL_QUALITY_PENALTY = 0.06
+CHALLENGE_DECISION_BONUS = 0.05
+CHALLENGE_DECISION_PENALTY = 0.05
+PASS_MISSED_CHALLENGE_PENALTY = 0.06
 BID_PLAUSIBILITY_BONUS = 0.04
 BID_PLAUSIBILITY_PENALTY = 0.04
 SHAPING_REWARD_CLIP = 0.50
@@ -254,62 +253,105 @@ def _count_face_support(own_dice: list[int], target_face: int, wild_six_enabled:
     return sum(1 for value in own_dice if value == target_face)
 
 
+def _binomial_tail_probability(num_trials: int, success_prob: float, min_successes: int) -> float:
+    if min_successes <= 0:
+        return 1.0
+    if num_trials <= 0:
+        return 0.0
+
+    success_prob = _clamp(success_prob, 0.0, 1.0)
+    tail_probability = 0.0
+    for successes in range(min_successes, num_trials + 1):
+        tail_probability += math.comb(num_trials, successes) * (success_prob ** successes) * (
+            (1.0 - success_prob) ** (num_trials - successes)
+        )
+    return _clamp(tail_probability, 0.0, 1.0)
+
+
+def _estimate_bid_statistics(state_features: dict, bid: tuple[int, int]) -> dict:
+    own_dice = state_features.get("own_dice") or []
+    total_dice = int(state_features.get("total_dice") or 0)
+    wild_six_enabled = bool(state_features.get("wild_six_enabled"))
+    quantity, face = bid
+
+    if total_dice <= 0 or not own_dice:
+        return {
+            "known_support": 0,
+            "unknown_dice": 0,
+            "expected_total": 0.0,
+            "std_dev": 0.0,
+            "z_score": 0.0,
+            "truth_probability": 0.0,
+        }
+
+    known_support = _count_face_support(own_dice, face, wild_six_enabled)
+    unknown_dice = max(total_dice - len(own_dice), 0)
+    per_die_success_prob = 2.0 / 6.0 if (wild_six_enabled and face != 6) else 1.0 / 6.0
+
+    if unknown_dice == 0:
+        expected_total = float(known_support)
+        std_dev = 0.0
+    else:
+        expected_total = known_support + unknown_dice * per_die_success_prob
+        std_dev = math.sqrt(unknown_dice * per_die_success_prob * (1.0 - per_die_success_prob))
+
+    additional_needed = max(quantity - known_support, 0)
+    truth_probability = _binomial_tail_probability(
+        num_trials=unknown_dice,
+        success_prob=per_die_success_prob,
+        min_successes=additional_needed,
+    )
+
+    if std_dev > 0:
+        z_score = (quantity - expected_total) / std_dev
+    elif quantity <= expected_total:
+        z_score = -1.0
+    else:
+        z_score = 3.0
+
+    return {
+        "known_support": known_support,
+        "unknown_dice": unknown_dice,
+        "expected_total": expected_total,
+        "std_dev": std_dev,
+        "z_score": z_score,
+        "truth_probability": truth_probability,
+    }
+
+
 def _score_bid_plausibility(state_features: dict, bid: tuple[int, int]) -> float:
     own_dice = state_features.get("own_dice") or []
     total_dice = int(state_features.get("total_dice") or 0)
     current_bid = state_features.get("current_bid")
-    wild_six_enabled = bool(state_features.get("wild_six_enabled"))
 
     if total_dice <= 0 or not own_dice:
         return 0.0
 
-    quantity, face = bid
-    known_support = _count_face_support(own_dice, face, wild_six_enabled)
-    unknown_dice = max(total_dice - len(own_dice), 0)
+    bid_stats = _estimate_bid_statistics(state_features, bid)
+    truth_probability = float(bid_stats["truth_probability"])
 
     reward = 0.0
 
-    # Probabilistic z-score scoring
-    if unknown_dice == 0:
-        # No unknown dice — just compare directly
-        if quantity <= known_support:
-            reward += BID_PLAUSIBILITY_BONUS
-        else:
-            reward -= BID_PLAUSIBILITY_PENALTY
-    else:
-        p = 2.0 / 6.0 if (wild_six_enabled and face != 6) else 1.0 / 6.0
-        expected_from_unknown = unknown_dice * p
-        std_dev = math.sqrt(unknown_dice * p * (1.0 - p))
-        expected_total = known_support + expected_from_unknown
+    if truth_probability >= 0.60:
+        reward += BID_PLAUSIBILITY_BONUS
+    elif truth_probability >= 0.35:
+        reward += BID_PLAUSIBILITY_BONUS * 0.5
+    elif truth_probability <= 0.10:
+        reward -= BID_PLAUSIBILITY_PENALTY
+    elif truth_probability <= 0.20:
+        reward -= BID_PLAUSIBILITY_PENALTY * 0.5
 
-        if std_dev == 0:
-            if quantity <= expected_total:
-                reward += BID_PLAUSIBILITY_BONUS
-            else:
-                reward -= BID_PLAUSIBILITY_PENALTY
-        else:
-            z = (quantity - expected_total) / std_dev
-            if z <= 1.0:
-                reward += BID_PLAUSIBILITY_BONUS
-            elif z <= 2.0:
-                pass  # borderline, no reward or penalty
-            else:
-                reward -= BID_PLAUSIBILITY_PENALTY * min((z - 2.0) / 2.0, 1.0)
-
-    # Bid escalation
     if current_bid is not None:
         jump = _bid_rank(bid) - _bid_rank(current_bid)
         if jump <= 2:
             reward += 0.01
         elif jump >= 7:
-            if known_support < 2:
-                reward -= 0.02
+            if truth_probability < 0.30:
+                reward -= 0.03
             else:
                 reward += 0.01
-        # jump 3-6: neutral, no adjustment
 
     return reward
-
 
 def _parse_action_id(completion_text: str, legal_action_map: dict[str, str]) -> str:
     if not legal_action_map:
@@ -341,6 +383,57 @@ def _parse_action_id(completion_text: str, legal_action_map: dict[str, str]) -> 
             if _extract_bid_tuple(label) == bid_tuple:
                 return action_id
 
+    return ""
+
+
+def _score_challenge_decision(
+    state_features: dict,
+    chose_liar: bool,
+    proposed_bid: tuple[int, int] | None,
+) -> tuple[float, dict]:
+    current_bid = state_features.get("current_bid")
+    if current_bid is None:
+        return 0.0, {"current_bid_z": 0.0, "current_bid_truth_probability": 0.0}
+
+    current_bid_stats = _estimate_bid_statistics(state_features, current_bid)
+    current_bid_z = float(current_bid_stats["z_score"])
+    current_bid_truth_probability = float(current_bid_stats["truth_probability"])
+    reward = 0.0
+
+    if chose_liar:
+        if current_bid_truth_probability <= 0.22:
+            reward += CHALLENGE_DECISION_BONUS * (
+                1.0 + _clamp((0.22 - current_bid_truth_probability) / 0.22, 0.0, 1.0)
+            )
+        elif current_bid_truth_probability >= 0.60:
+            reward -= CHALLENGE_DECISION_PENALTY
+    elif proposed_bid is not None:
+        if current_bid_truth_probability <= 0.10:
+            reward -= PASS_MISSED_CHALLENGE_PENALTY * (
+                1.0 + _clamp((0.10 - current_bid_truth_probability) / 0.10, 0.0, 1.0)
+            )
+        elif current_bid_truth_probability >= 0.55:
+            reward += 0.01
+
+    return reward, {
+        "current_bid_z": current_bid_z,
+        "current_bid_truth_probability": current_bid_truth_probability,
+    }
+
+
+def _select_fallback_action(legal_action_map: dict[str, str], state_features: dict) -> str:
+    liar_actions = [
+        action_id
+        for action_id, label in legal_action_map.items()
+        if _is_liar_label(label)
+    ]
+    current_bid = state_features.get("current_bid")
+    if liar_actions and current_bid is not None:
+        current_bid_truth_probability = float(
+            _estimate_bid_statistics(state_features, current_bid)["truth_probability"]
+        )
+        if current_bid_truth_probability <= 0.08:
+            return liar_actions[0]
     return sorted(legal_action_map.keys(), key=lambda x: int(x))[0]
 
 
@@ -503,19 +596,28 @@ def _log_batch_statistics(list_results: list[dict]) -> None:
 
 
 def _get_system_prompt(use_hints: bool) -> str:
-    system_prompt = (
-        "You are playing liars_dice.\n\n"
-        "# Game Rules\n"
-        "LIAR'S DICE RULES:\n"
-        "- Each player has hidden dice.\n"
-        "- Players make increasing bids in format quantity-face.\n"
-        "- You can either raise the bid or choose Liar to challenge.\n"
-        "- In this environment, 6s are wild and count as any face unless stated otherwise.\n"
-        "- Use ONLY legal action IDs from the current Legal Actions block.\n\n"
-        "# Output Format\n"
-        "Respond with only one legal action ID number.\n"
-        "No explanations.\n"
-    )
+    system_prompt = """You are playing liars_dice.
+
+# Game Rules
+LIAR'S DICE RULES:
+
+Setup: Each player has N dice (1-5 depending on variant). All players roll their dice secretly.
+
+Goal: Make bids about total dice across ALL players, or call "Liar" on opponent's bid.
+
+Actions:
+- Bid (quantity, face): Claim there are at least 'quantity' dice showing 'face' among all dice.
+- Call Liar: Challenge the previous bid.
+
+Bidding rules: Each bid must be higher than the previous bid. "Higher" means:
+  - Same face value but higher quantity (e.g., "2 fours" beats "1 four")
+  - Same quantity but higher face value (e.g., "2 fives" beats "2 fours")
+
+Wild dice: 6s are WILD and count as ANY face value.
+- When counting dice for a bid, include 6s in the count
+- Example: Bid "3 fours" means at least 3 dice showing EITHER 4 OR 6
+
+Winning: If you call Liar and previous bid was false, opponent loses. If bid was true or exact, you lose."""
     if use_hints:
         system_prompt += "\n" + STRATEGY_TIPS
     return system_prompt
@@ -550,7 +652,6 @@ def _rollout_parallelized_curriculum(
         env_endpoint = server["base_url"]
 
         invalid_count = 0
-        noop_count = 0
         done = False
         final_reward = 0.0
         turn_number = 0
@@ -651,23 +752,31 @@ def _rollout_parallelized_curriculum(
             messages.append({"role": "assistant", "content": completion_text})
 
             action_to_send = _parse_action_id(completion_text, legal_action_map)
+            parse_failed = not action_to_send
+            if parse_failed or action_to_send not in legal_action_map:
+                invalid_count += 1
+                accumulated_shaping_reward -= INVALID_ACTION_PENALTY
+                action_to_send = _select_fallback_action(legal_action_map, state_features)
+
             action_label = legal_action_map.get(action_to_send, "")
             liar_action = _is_liar_label(action_label)
             parsed_bid = _extract_bid_tuple(action_label)
 
-            if action_to_send not in legal_action_map:
-                invalid_count += 1
-                accumulated_shaping_reward -= INVALID_ACTION_PENALTY
-                action_to_send = sorted(legal_action_map.keys(), key=lambda x: int(x))[0]
-                action_label = legal_action_map.get(action_to_send, "")
-                liar_action = _is_liar_label(action_label)
-                parsed_bid = _extract_bid_tuple(action_label)
-
             bid_shaping = 0.0
-            call_shaping = 0.0
+            decision_shaping = 0.0
+            current_bid_z = 0.0
+            current_bid_truth_probability = 0.0
             if parsed_bid is not None:
                 bid_shaping = _score_bid_plausibility(state_features, parsed_bid)
                 accumulated_shaping_reward += bid_shaping
+            decision_shaping, decision_meta = _score_challenge_decision(
+                state_features=state_features,
+                chose_liar=liar_action,
+                proposed_bid=parsed_bid,
+            )
+            current_bid_z = float(decision_meta.get("current_bid_z", 0.0))
+            current_bid_truth_probability = float(decision_meta.get("current_bid_truth_probability", 0.0))
+            accumulated_shaping_reward += decision_shaping
 
             try:
                 formatted_observation, step_reward, done, last_step_block = _step_environment(
@@ -685,50 +794,18 @@ def _rollout_parallelized_curriculum(
                 accumulated_shaping_reward -= INVALID_ACTION_PENALTY
                 last_step_block = {"reward": step_reward, "done": False}
 
+            observation_lower = formatted_observation.lower()
             invalid_or_noop = (
-                "Invalid" in formatted_observation
-                or "Nothing happens" in formatted_observation
-                or action_to_send not in legal_action_map
+                "invalid" in observation_lower
+                or "nothing happens" in observation_lower
+                or "nothing happened" in observation_lower
             )
             if invalid_or_noop:
                 invalid_count += 1
                 accumulated_shaping_reward -= INVALID_ACTION_PENALTY
 
-            if formatted_observation == observation_before_action:
-                noop_count += 1
-                accumulated_shaping_reward -= NOOP_PENALTY
-
             if done:
                 final_reward = _extract_terminal_reward(last_step_block, formatted_observation)
-                if liar_action and state_features.get("current_bid") is not None:
-                    # Scaled call quality based on bid implausibility
-                    cb_quantity, cb_face = state_features["current_bid"]
-                    cb_known = _count_face_support(
-                        state_features.get("own_dice") or [],
-                        cb_face,
-                        bool(state_features.get("wild_six_enabled")),
-                    )
-                    cb_total_dice = int(state_features.get("total_dice") or 1)
-                    cb_unknown = max(cb_total_dice - len(state_features.get("own_dice") or []), 0)
-                    cb_p = (
-                        2.0 / 6.0
-                        if (bool(state_features.get("wild_six_enabled")) and cb_face != 6)
-                        else 1.0 / 6.0
-                    )
-                    cb_expected = cb_known + cb_unknown * cb_p
-                    implausibility = (cb_quantity - cb_expected) / max(cb_total_dice, 1)
-
-                    if final_reward > 0:
-                        call_shaping = CALL_QUALITY_BONUS * (1.0 + _clamp(implausibility, 0.0, 2.0))
-                    elif final_reward < 0:
-                        call_shaping = -CALL_QUALITY_PENALTY * (1.0 + _clamp(-implausibility, 0.0, 1.0))
-                    accumulated_shaping_reward += call_shaping
-                elif liar_action:
-                    if final_reward > 0:
-                        call_shaping = CALL_QUALITY_BONUS
-                    elif final_reward < 0:
-                        call_shaping = -CALL_QUALITY_PENALTY
-                    accumulated_shaping_reward += call_shaping
                 termination_reason = "done"
             else:
                 messages.append({"role": "user", "content": formatted_observation})
@@ -749,9 +826,12 @@ def _rollout_parallelized_curriculum(
                     ),
                     "step_reward": float(step_reward),
                     "bid_shaping": float(bid_shaping),
-                    "call_shaping": float(call_shaping),
+                    "decision_shaping": float(decision_shaping),
+                    "current_bid_z": float(current_bid_z),
+                    "current_bid_truth_probability": float(current_bid_truth_probability),
                     "done": bool(done),
                     "invalid_or_noop": invalid_or_noop,
+                    "parse_failed": bool(parse_failed),
                 }
             )
 
@@ -760,11 +840,7 @@ def _rollout_parallelized_curriculum(
         if not done:
             if termination_reason == "unknown":
                 termination_reason = "max_turn_reached"
-            if current_max_turn < curriculum.final_max_turn:
-                final_reward = 0.0
-            else:
-                final_reward = -TRUNCATION_PENALTY
-            accumulated_shaping_reward -= TRUNCATION_PENALTY
+            final_reward = 0.0
 
         clipped_shaping = _clamp(accumulated_shaping_reward, -SHAPING_REWARD_CLIP, SHAPING_REWARD_CLIP)
         train_reward = final_reward + clipped_shaping
@@ -772,7 +848,7 @@ def _rollout_parallelized_curriculum(
         print(
             f"[ID:{game_id} Done:{int(done)} T:{turn_number:2d} "
             f"Env:{final_reward:+.3f} Shape:{accumulated_shaping_reward:+.3f} "
-            f"ClipShape:{clipped_shaping:+.3f} Inv:{invalid_count} Noop:{noop_count}"
+            f"ClipShape:{clipped_shaping:+.3f} Inv:{invalid_count}"
         )
 
         if trace_logger and trace_logger.should_log():
@@ -790,7 +866,6 @@ def _rollout_parallelized_curriculum(
                     "clipped_shaping_reward": float(clipped_shaping),
                     "train_reward": float(train_reward),
                     "invalid_count": invalid_count,
-                    "noop_count": noop_count,
                     "steps": step_records,
                 }
             )
