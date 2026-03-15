@@ -822,7 +822,12 @@ def main():
             
         print("train_ds.column_names: ", train_ds.column_names)
 
-        max_steps = train_request.get("max_steps", -1)
+        if training_args.environment_name == "liars_dice":
+            max_steps = 900
+        elif training_args.environment_name == "gin_rummy":
+            max_steps = 300
+        else:
+            max_steps = train_request.get("max_steps", -1)
         log_info(f"max_steps: {max_steps}")
         if max_steps is not None and max_steps != -1:
             training_args.max_steps = int(max_steps)
