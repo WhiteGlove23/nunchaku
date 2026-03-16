@@ -38,7 +38,7 @@ GRPO_CONFIG = {
         "rollouts_per_stage": 1280,
     },
     "2_4_b": {
-        "lr": 1e-5,
+        "lr": 1e-4,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -94,7 +94,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "6_9_b": {
-        "lr": 1e-5,
+        "lr": 1e-4,
         "distributed": "ddp",
         "gpu_count": 4,
         "batch_size": 1,
@@ -256,7 +256,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
     --beta {beta} \
     --num_generations {num_generations} \
     --loss_type dr_grpo \
-    --num_iterations 2 \
+    --num_iterations 1 \
     --do_eval False \
     --vllm_max_model_length 16384"""
     )
