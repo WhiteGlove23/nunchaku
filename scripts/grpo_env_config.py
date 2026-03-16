@@ -255,7 +255,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
     --disable_action_mask {disable_action_mask} \
     --beta {beta} \
     --num_generations {num_generations} \
-    --loss_type dr_grpo \
+    --loss_type dapo \
     --num_iterations 1 \
     --do_eval False \
     --vllm_max_model_length 16384"""
