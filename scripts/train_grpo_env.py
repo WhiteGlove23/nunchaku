@@ -857,7 +857,7 @@ def main():
             elif training_args.environment_name == "gin_rummy":
                 rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = gin_rummy_rollout_reward_func
-                training_args.initial_max_turn = 50
+                training_args.initial_max_turn = 8
                 trainer_class = ActionMaskedGRPOTrainer
             elif training_args.environment_name == "liars_dice":
                 rollout_func = liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum
@@ -897,7 +897,7 @@ def main():
             elif training_args.environment_name == "gin_rummy":
                 rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = gin_rummy_rollout_reward_func
-                training_args.initial_max_turn = 50
+                training_args.initial_max_turn = 8
                 trainer_class = GRPOTrainer
             elif training_args.environment_name == "liars_dice":
                 rollout_func = liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum
@@ -935,7 +935,7 @@ def main():
             elif training_args.environment_name == "gin_rummy":
                 rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = gin_rummy_rollout_reward_func
-                training_args.initial_max_turn = 50
+                training_args.initial_max_turn = 8
                 trainer_class = ActionMaskedGRPOTrainer
             elif training_args.environment_name == "liars_dice":
                 rollout_func = liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum
