@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import random
 import re
@@ -29,24 +28,54 @@ MAX_PROMPT_LEN = 16384 - 512
 
 MCTS_CONFIG = {
     "opponent": "mcts",
-    "mcts_max_simulations": 50,
+    "mcts_max_simulations":50,
     "mcts_num_rollouts": 1,
 }
 
 # Reward settings
 INVALID_ACTION_PENALTY = 0.10
-PASS_MISSED_CHALLENGE_PENALTY = 0.06
-BID_PLAUSIBILITY_BONUS = 0.04
-BID_PLAUSIBILITY_PENALTY = 0.04
-SHAPING_REWARD_CLIP = 0.50
+RULE_ACTION_MATCH_REWARD = 0.20
+RULE_ACTION_MISMATCH_PENALTY = 0.20
+RULE_INVALID_ACTION_PENALTY = 0.30
+IMITATION_REWARD_CLIP = 1.00
 TERMINAL_REWARD_CLIP = 1.00
+TERMINAL_REWARD_WEIGHT = 0.10
+
+RULE_POLICY_MODE = "probability"
+RULE_LIAR_PROB_THRESHOLD = 0.30
+RULE_LIAR_FACE5_THRESHOLD = 0.30
+RULE_LIAR_FACE6_THRESHOLD = 0.30
+RULE_OPENING_MODE = "best_support_low"
+RULE_OPENING_MAX_QUANTITY = 2
+RULE_RAISE_MODE = "max_support_then_low"
+
+RULE_OPPONENT_TRUTH_PROBABILITY = {
+    6: {
+        0: 1.0,
+        1: 0.5981224279835391,
+        2: 0.1962448559670782,
+        3: 0.035493827160493825,
+        4: 0.003343621399176955,
+        5: 0.0001286008230452675,
+    },
+    5: {
+        0: 1.0,
+        1: 0.8683127572016461,
+        2: 0.5390946502057613,
+        3: 0.20987654320987653,
+        4: 0.04526748971193416,
+        5: 0.00411522633744856,
+    },
+}
 
 STRATEGY_TIPS = """
 STRATEGY TIPS:
-- Keep bids minimally stronger than current bid when uncertain.
-- Use your own dice + wild 6s to estimate plausible total counts.
-- Prefer calling Liar when the required quantity is implausibly high.
-- Avoid large overbids unless your private dice strongly support it.
+- Output only the action ID. Never include explanations or extra text.
+- Treat 6s as wild only for bids on faces 1-5. For bids on face 6, count only actual 6s.
+- If the current bid's rule truth probability is 0.30 or lower, choose Liar immediately.
+- If there is no current bid, open with the best-supported legal bid of quantity 2 or lower.
+- Otherwise raise using this exact priority: highest own support, then lowest bid rank, then highest truth probability.
+- When multiple actions seem close, follow the exact tie-break rules above rather than a general strategy.
 """
 
 REASONING_TAG_PAIRS = [
@@ -245,111 +274,130 @@ def _bid_rank(bid: tuple[int, int]) -> int:
     return quantity * 6 + face
 
 
-def _count_face_support(own_dice: list[int], target_face: int, wild_six_enabled: bool) -> int:
-    if wild_six_enabled and target_face != 6:
-        return sum(1 for value in own_dice if value == target_face or value == 6)
-    return sum(1 for value in own_dice if value == target_face)
+def _rule_count_face_support(own_dice: list[int], target_face: int) -> int:
+    if target_face == 6:
+        return sum(1 for value in own_dice if value == 6)
+    return sum(1 for value in own_dice if value == target_face or value == 6)
 
 
-def _binomial_tail_probability(num_trials: int, success_prob: float, min_successes: int) -> float:
-    if min_successes <= 0:
-        return 1.0
-    if num_trials <= 0:
-        return 0.0
-
-    success_prob = _clamp(success_prob, 0.0, 1.0)
-    tail_probability = 0.0
-    for successes in range(min_successes, num_trials + 1):
-        tail_probability += math.comb(num_trials, successes) * (success_prob ** successes) * (
-            (1.0 - success_prob) ** (num_trials - successes)
-        )
-    return _clamp(tail_probability, 0.0, 1.0)
-
-
-def _estimate_bid_statistics(state_features: dict, bid: tuple[int, int]) -> dict:
-    own_dice = state_features.get("own_dice") or []
-    total_dice = int(state_features.get("total_dice") or 0)
-    wild_six_enabled = bool(state_features.get("wild_six_enabled"))
+def _rule_bid_truth_probability(own_dice: list[int], bid: tuple[int, int]) -> float:
     quantity, face = bid
+    own_support = _rule_count_face_support(own_dice, face)
+    need_from_opponent = max(0, quantity - own_support)
+    table_key = 6 if face == 6 else 5
+    return float(RULE_OPPONENT_TRUTH_PROBABILITY[table_key].get(need_from_opponent, 0.0))
 
-    if total_dice <= 0 or not own_dice:
-        return {
-            "known_support": 0,
-            "unknown_dice": 0,
-            "expected_total": 0.0,
-            "std_dev": 0.0,
-            "z_score": 0.0,
-            "truth_probability": 0.0,
-        }
 
-    known_support = _count_face_support(own_dice, face, wild_six_enabled)
-    unknown_dice = max(total_dice - len(own_dice), 0)
-    per_die_success_prob = 2.0 / 6.0 if (wild_six_enabled and face != 6) else 1.0 / 6.0
+def _rule_liar_threshold_for_bid(bid: tuple[int, int]) -> float:
+    _, face = bid
+    if face == 6:
+        return RULE_LIAR_FACE6_THRESHOLD
+    if face == 5:
+        return RULE_LIAR_FACE5_THRESHOLD
+    return RULE_LIAR_PROB_THRESHOLD
 
-    if unknown_dice == 0:
-        expected_total = float(known_support)
-        std_dev = 0.0
+
+def _rule_choose_raise_action(legal_action_map: dict[str, str], own_dice: list[int], mode: str) -> tuple[str, dict]:
+    scored_actions = []
+    for action_id, label in legal_action_map.items():
+        if _is_liar_label(label):
+            continue
+        bid = _extract_bid_tuple(label)
+        if bid is None:
+            continue
+        truth_probability = _rule_bid_truth_probability(own_dice, bid)
+        own_support = _rule_count_face_support(own_dice, bid[1])
+        scored_actions.append((action_id, bid, truth_probability, own_support))
+
+    if not scored_actions:
+        return "", {}
+
+    if mode == "max_truth_then_low":
+        scored_actions.sort(key=lambda item: (-item[2], _bid_rank(item[1]), -item[3]))
+    elif mode == "max_support_then_low":
+        scored_actions.sort(key=lambda item: (-item[3], _bid_rank(item[1]), -item[2]))
     else:
-        expected_total = known_support + unknown_dice * per_die_success_prob
-        std_dev = math.sqrt(unknown_dice * per_die_success_prob * (1.0 - per_die_success_prob))
+        scored_actions.sort(key=lambda item: _bid_rank(item[1]))
 
-    additional_needed = max(quantity - known_support, 0)
-    truth_probability = _binomial_tail_probability(
-        num_trials=unknown_dice,
-        success_prob=per_die_success_prob,
-        min_successes=additional_needed,
-    )
-
-    if std_dev > 0:
-        z_score = (quantity - expected_total) / std_dev
-    elif quantity <= expected_total:
-        z_score = -1.0
-    else:
-        z_score = 3.0
-
-    return {
-        "known_support": known_support,
-        "unknown_dice": unknown_dice,
-        "expected_total": expected_total,
-        "std_dev": std_dev,
-        "z_score": z_score,
-        "truth_probability": truth_probability,
+    action_id, bid, truth_probability, own_support = scored_actions[0]
+    return action_id, {
+        "selected_bid": bid,
+        "selected_bid_support": own_support,
+        "selected_bid_truth_probability": truth_probability,
     }
 
 
-def _score_bid_plausibility(state_features: dict, bid: tuple[int, int]) -> float:
-    own_dice = state_features.get("own_dice") or []
-    total_dice = int(state_features.get("total_dice") or 0)
+def _rule_choose_opening_action(legal_action_map: dict[str, str], own_dice: list[int]) -> tuple[str, dict]:
+    scored_actions = []
+    for action_id, label in legal_action_map.items():
+        bid = _extract_bid_tuple(label)
+        if bid is None or bid[0] > RULE_OPENING_MAX_QUANTITY:
+            continue
+        truth_probability = _rule_bid_truth_probability(own_dice, bid)
+        own_support = _rule_count_face_support(own_dice, bid[1])
+        scored_actions.append((action_id, bid, truth_probability, own_support))
+
+    if not scored_actions:
+        return "", {}
+
+    if RULE_OPENING_MODE == "best_support_low":
+        scored_actions.sort(key=lambda item: (-item[3], _bid_rank(item[1]), -item[2]))
+    elif RULE_OPENING_MODE == "best_truth_low":
+        scored_actions.sort(key=lambda item: (-item[2], _bid_rank(item[1]), -item[3]))
+    else:
+        scored_actions.sort(key=lambda item: _bid_rank(item[1]))
+
+    action_id, bid, truth_probability, own_support = scored_actions[0]
+    return action_id, {
+        "selected_bid": bid,
+        "selected_bid_support": own_support,
+        "selected_bid_truth_probability": truth_probability,
+    }
+
+
+def _select_rule_target_action(observation: str, legal_action_map: dict[str, str]) -> tuple[str, dict]:
+    if not legal_action_map:
+        return "", {}
+
+    state_features = _extract_state_features(observation)
     current_bid = state_features.get("current_bid")
+    own_dice = state_features.get("own_dice") or []
+    liar_action_id = next(
+        (action_id for action_id, label in legal_action_map.items() if _is_liar_label(label)),
+        "",
+    )
 
-    if total_dice <= 0 or not own_dice:
-        return 0.0
+    if RULE_POLICY_MODE == "probability":
+        if current_bid is None:
+            opening_action, opening_meta = _rule_choose_opening_action(legal_action_map, own_dice)
+            if opening_action:
+                return opening_action, {
+                    "current_bid_probability": 0.0,
+                    **opening_meta,
+                }
+        else:
+            current_bid_probability = _rule_bid_truth_probability(own_dice, current_bid)
+            if liar_action_id and current_bid_probability <= _rule_liar_threshold_for_bid(current_bid):
+                return liar_action_id, {
+                    "current_bid_probability": current_bid_probability,
+                    "selected_bid": None,
+                    "selected_bid_support": 0,
+                    "selected_bid_truth_probability": 0.0,
+                }
+            raise_action, raise_meta = _rule_choose_raise_action(legal_action_map, own_dice, RULE_RAISE_MODE)
+            if raise_action:
+                return raise_action, {
+                    "current_bid_probability": current_bid_probability,
+                    **raise_meta,
+                }
 
-    bid_stats = _estimate_bid_statistics(state_features, bid)
-    truth_probability = float(bid_stats["truth_probability"])
-
-    reward = 0.0
-
-    if truth_probability >= 0.60:
-        reward += BID_PLAUSIBILITY_BONUS
-    elif truth_probability >= 0.35:
-        reward += BID_PLAUSIBILITY_BONUS * 0.5
-    elif truth_probability <= 0.10:
-        reward -= BID_PLAUSIBILITY_PENALTY
-    elif truth_probability <= 0.20:
-        reward -= BID_PLAUSIBILITY_PENALTY * 0.5
-
-    if current_bid is not None:
-        jump = _bid_rank(bid) - _bid_rank(current_bid)
-        if jump <= 2:
-            reward += 0.01
-        elif jump >= 7:
-            if truth_probability < 0.30:
-                reward -= 0.03
-            else:
-                reward += 0.01
-
-    return reward
+    fallback_action = sorted(legal_action_map.keys(), key=lambda x: int(x))[0]
+    return fallback_action, {
+        "current_bid_probability": 0.0,
+        "selected_bid": None,
+        "selected_bid_support": 0,
+        "selected_bid_truth_probability": 0.0,
+    }
 
 def _parse_action_id(completion_text: str, legal_action_map: dict[str, str]) -> str:
     if not legal_action_map:
@@ -384,47 +432,7 @@ def _parse_action_id(completion_text: str, legal_action_map: dict[str, str]) -> 
     return ""
 
 
-def _score_challenge_decision(
-    state_features: dict,
-    chose_liar: bool,
-    proposed_bid: tuple[int, int] | None,
-) -> tuple[float, dict]:
-    current_bid = state_features.get("current_bid")
-    if current_bid is None:
-        return 0.0, {"current_bid_z": 0.0, "current_bid_truth_probability": 0.0}
-
-    current_bid_stats = _estimate_bid_statistics(state_features, current_bid)
-    current_bid_z = float(current_bid_stats["z_score"])
-    current_bid_truth_probability = float(current_bid_stats["truth_probability"])
-    reward = 0.0
-
-    if not chose_liar and proposed_bid is not None:
-        if current_bid_truth_probability <= 0.10:
-            reward -= PASS_MISSED_CHALLENGE_PENALTY * (
-                1.0 + _clamp((0.10 - current_bid_truth_probability) / 0.10, 0.0, 1.0)
-            )
-        elif current_bid_truth_probability >= 0.55:
-            reward += 0.01
-
-    return reward, {
-        "current_bid_z": current_bid_z,
-        "current_bid_truth_probability": current_bid_truth_probability,
-    }
-
-
-def _select_fallback_action(legal_action_map: dict[str, str], state_features: dict) -> str:
-    liar_actions = [
-        action_id
-        for action_id, label in legal_action_map.items()
-        if _is_liar_label(label)
-    ]
-    current_bid = state_features.get("current_bid")
-    if liar_actions and current_bid is not None:
-        current_bid_truth_probability = float(
-            _estimate_bid_statistics(state_features, current_bid)["truth_probability"]
-        )
-        if current_bid_truth_probability <= 0.08:
-            return liar_actions[0]
+def _select_fallback_action(legal_action_map: dict[str, str]) -> str:
     return sorted(legal_action_map.keys(), key=lambda x: int(x))[0]
 
 
@@ -616,6 +624,15 @@ Do NOT include descriptions or explanations.
 Examples:
 - For action "59 -> 10-6": respond "59"
 - For action "60 -> Liar": respond "60"
+
+# Policy To Follow
+Follow this exact action-selection policy:
+- Count support for bids on faces 1-5 as dice matching that face plus any 6s.
+- Count support for bids on face 6 using only actual 6s.
+- If there is a current bid and its rule truth probability is 0.30 or lower, choose Liar immediately.
+- If there is no current bid, choose the legal opening bid with quantity 2 or lower that maximizes own support, then minimizes bid rank, then maximizes truth probability.
+- Otherwise choose the legal raise that maximizes own support, then minimizes bid rank, then maximizes truth probability.
+- If multiple actions look plausible, follow the exact tie-break rules above.
 """
     if use_hints:
         system_prompt += "\n" + STRATEGY_TIPS
@@ -654,7 +671,7 @@ def _rollout_parallelized_curriculum(
         done = False
         final_reward = 0.0
         turn_number = 0
-        accumulated_shaping_reward = 0.0
+        accumulated_imitation_reward = 0.0
         step_records = []
         termination_reason = "unknown"
         last_step_block: dict = {}
@@ -698,12 +715,17 @@ def _rollout_parallelized_curriculum(
         while not done and turn_number < current_max_turn:
             observation_before_action = formatted_observation
             legal_action_map = _extract_legal_action_map(observation_before_action)
-            state_features = _extract_state_features(observation_before_action)
 
             if not legal_action_map:
-                accumulated_shaping_reward -= INVALID_ACTION_PENALTY
+                accumulated_imitation_reward -= RULE_INVALID_ACTION_PENALTY
                 termination_reason = "no_legal_actions"
                 break
+
+            target_action_id, target_action_meta = _select_rule_target_action(
+                observation=observation_before_action,
+                legal_action_map=legal_action_map,
+            )
+            target_action_label = legal_action_map.get(target_action_id, "")
 
             with _ROLLOUT_STATE["generation_semaphore"]:
                 rollout_outputs = generate_rollout_completions(trainer, prompts=[messages], as_chat=True)[0]
@@ -754,28 +776,22 @@ def _rollout_parallelized_curriculum(
             parse_failed = not action_to_send
             if parse_failed or action_to_send not in legal_action_map:
                 invalid_count += 1
-                accumulated_shaping_reward -= INVALID_ACTION_PENALTY
-                action_to_send = _select_fallback_action(legal_action_map, state_features)
+                step_imitation_reward = -RULE_INVALID_ACTION_PENALTY
+                action_to_send = _select_fallback_action(legal_action_map)
+            elif action_to_send == target_action_id:
+                step_imitation_reward = RULE_ACTION_MATCH_REWARD
+            else:
+                step_imitation_reward = -RULE_ACTION_MISMATCH_PENALTY
+
+            accumulated_imitation_reward += step_imitation_reward
 
             action_label = legal_action_map.get(action_to_send, "")
-            liar_action = _is_liar_label(action_label)
-            parsed_bid = _extract_bid_tuple(action_label)
-
-            bid_shaping = 0.0
-            decision_shaping = 0.0
-            current_bid_z = 0.0
-            current_bid_truth_probability = 0.0
-            if parsed_bid is not None:
-                bid_shaping = _score_bid_plausibility(state_features, parsed_bid)
-                accumulated_shaping_reward += bid_shaping
-            decision_shaping, decision_meta = _score_challenge_decision(
-                state_features=state_features,
-                chose_liar=liar_action,
-                proposed_bid=parsed_bid,
+            target_bid = target_action_meta.get("selected_bid")
+            rule_current_bid_probability = float(target_action_meta.get("current_bid_probability", 0.0))
+            rule_selected_bid_support = int(target_action_meta.get("selected_bid_support", 0))
+            rule_selected_bid_truth_probability = float(
+                target_action_meta.get("selected_bid_truth_probability", 0.0)
             )
-            current_bid_z = float(decision_meta.get("current_bid_z", 0.0))
-            current_bid_truth_probability = float(decision_meta.get("current_bid_truth_probability", 0.0))
-            accumulated_shaping_reward += decision_shaping
 
             try:
                 formatted_observation, step_reward, done, last_step_block = _step_environment(
@@ -790,7 +806,7 @@ def _rollout_parallelized_curriculum(
                 step_reward = -0.01
                 done = False
                 invalid_count += 1
-                accumulated_shaping_reward -= INVALID_ACTION_PENALTY
+                accumulated_imitation_reward -= INVALID_ACTION_PENALTY
                 last_step_block = {"reward": step_reward, "done": False}
 
             observation_lower = formatted_observation.lower()
@@ -801,7 +817,7 @@ def _rollout_parallelized_curriculum(
             )
             if invalid_or_noop:
                 invalid_count += 1
-                accumulated_shaping_reward -= INVALID_ACTION_PENALTY
+                accumulated_imitation_reward -= INVALID_ACTION_PENALTY
 
             if done:
                 final_reward = _extract_terminal_reward(last_step_block, formatted_observation)
@@ -824,10 +840,14 @@ def _rollout_parallelized_curriculum(
                         trace_logger.clip_text(formatted_observation) if trace_logger else formatted_observation
                     ),
                     "step_reward": float(step_reward),
-                    "bid_shaping": float(bid_shaping),
-                    "decision_shaping": float(decision_shaping),
-                    "current_bid_z": float(current_bid_z),
-                    "current_bid_truth_probability": float(current_bid_truth_probability),
+                    "target_action": target_action_id,
+                    "target_action_label": target_action_label,
+                    "model_action_matches_target": bool(not parse_failed and action_to_send == target_action_id),
+                    "step_imitation_reward": float(step_imitation_reward),
+                    "rule_current_bid_probability": rule_current_bid_probability,
+                    "rule_selected_bid": target_bid,
+                    "rule_selected_bid_support": rule_selected_bid_support,
+                    "rule_selected_bid_truth_probability": rule_selected_bid_truth_probability,
                     "done": bool(done),
                     "invalid_or_noop": invalid_or_noop,
                     "parse_failed": bool(parse_failed),
@@ -841,13 +861,19 @@ def _rollout_parallelized_curriculum(
                 termination_reason = "max_turn_reached"
             final_reward = 0.0
 
-        clipped_shaping = _clamp(accumulated_shaping_reward, -SHAPING_REWARD_CLIP, SHAPING_REWARD_CLIP)
-        train_reward = final_reward + clipped_shaping
+        clipped_imitation_reward = _clamp(
+            accumulated_imitation_reward,
+            -IMITATION_REWARD_CLIP,
+            IMITATION_REWARD_CLIP,
+        )
+        weighted_terminal_reward = TERMINAL_REWARD_WEIGHT * final_reward
+        train_reward = clipped_imitation_reward + weighted_terminal_reward
 
         print(
             f"[ID:{game_id} Done:{int(done)} T:{turn_number:2d} "
-            f"Env:{final_reward:+.3f} Shape:{accumulated_shaping_reward:+.3f} "
-            f"ClipShape:{clipped_shaping:+.3f} Inv:{invalid_count}"
+            f"Env:{final_reward:+.3f} Imit:{accumulated_imitation_reward:+.3f} "
+            f"ClipImit:{clipped_imitation_reward:+.3f} WeightedEnv:{weighted_terminal_reward:+.3f} "
+            f"Inv:{invalid_count}"
         )
 
         if trace_logger and trace_logger.should_log():
@@ -861,8 +887,9 @@ def _rollout_parallelized_curriculum(
                     "termination_reason": termination_reason,
                     "turns": turn_number,
                     "final_reward": float(final_reward),
-                    "raw_shaping_reward": float(accumulated_shaping_reward),
-                    "clipped_shaping_reward": float(clipped_shaping),
+                    "raw_imitation_reward": float(accumulated_imitation_reward),
+                    "clipped_imitation_reward": float(clipped_imitation_reward),
+                    "weighted_terminal_reward": float(weighted_terminal_reward),
                     "train_reward": float(train_reward),
                     "invalid_count": invalid_count,
                     "steps": step_records,

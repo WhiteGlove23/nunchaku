@@ -895,6 +895,48 @@ class RewardCalculator:
             return self.invalid_penalty
         return 0.0
 
+    @staticmethod
+    def compute_discard_safety(states: list[GameState]) -> float:
+        """
+        Measure how often the agent's discards get picked up by the opponent.
+
+        Walk consecutive state pairs: if the discard pile grew (agent discarded),
+        record the new card. If the pile later shrinks or loses that card
+        (opponent drew it face-up), count it as an unsafe discard.
+
+        Returns a penalty in [-0.1, 0.0].  0.0 = perfectly safe discards.
+        """
+        if len(states) < 2:
+            return 0.0
+
+        agent_discards: list[str] = []
+        unsafe_count = 0
+
+        prev_pile = states[0].discard_pile
+        for i in range(1, len(states)):
+            curr_pile = states[i].discard_pile
+
+            # Agent discarded: pile grew by one card
+            if len(curr_pile) == len(prev_pile) + 1:
+                new_card = curr_pile[-1]
+                agent_discards.append(new_card)
+
+            # Opponent drew face-up: pile shrank (top card taken)
+            elif len(curr_pile) < len(prev_pile) and agent_discards:
+                # The card that disappeared is the one the opponent took
+                taken = set(prev_pile) - set(curr_pile)
+                for card in taken:
+                    if card in agent_discards:
+                        unsafe_count += 1
+
+            prev_pile = curr_pile
+
+        if not agent_discards:
+            return 0.0
+
+        ratio = unsafe_count / len(agent_discards)
+        return -0.1 * ratio
+
     def calculate_episode_reward(
         self,
         step_rewards: list[float],
@@ -902,6 +944,7 @@ class RewardCalculator:
         done: bool,
         initial_state: GameState | None,
         final_state: GameState | None,
+        all_states: list[GameState] | None = None,
     ) -> float:
         """
         Combine deadwood improvement + terminal bonus + invalid penalties.
@@ -1378,7 +1421,7 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
         # Calculate episode reward (deadwood improvement + terminal + invalid penalties)
         initial_state = game_state_history[0] if game_state_history else None
         final_state = game_state_history[-1] if game_state_history else None
-        episode_reward = calculator.calculate_episode_reward(rewards, final_reward, done, initial_state, final_state)
+        episode_reward = calculator.calculate_episode_reward(rewards, final_reward, done, initial_state, final_state, all_states=game_state_history)
         train_reward = episode_reward
 
         initial_dw = game_state_history[0].deadwood if game_state_history else 0
@@ -1738,7 +1781,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         # Calculate episode reward (deadwood improvement + terminal + invalid penalties)
         initial_state = game_state_history[0] if game_state_history else None
         final_state = game_state_history[-1] if game_state_history else None
-        episode_reward = calculator.calculate_episode_reward(rewards, final_reward, done, initial_state, final_state)
+        episode_reward = calculator.calculate_episode_reward(rewards, final_reward, done, initial_state, final_state, all_states=game_state_history)
         train_reward = episode_reward
 
         initial_dw = game_state_history[0].deadwood if game_state_history else 0
