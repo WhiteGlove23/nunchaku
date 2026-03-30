@@ -38,7 +38,7 @@ GRPO_CONFIG = {
         "rollouts_per_stage": 1280,
     },
     "2_4_b": {
-        "lr": 5e-5,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -80,7 +80,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "5_6_b": {
-        "lr": 5e-5,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -94,7 +94,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "6_9_b": {
-        "lr": 5e-5,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 4,
         "batch_size": 1,
@@ -255,7 +255,6 @@ def get_run_cmd(config: dict, gpu_nums: int):
     --disable_action_mask {disable_action_mask} \
     --beta {beta} \
     --num_generations {num_generations} \
-    --loss_type dr_grpo \
     --loss_type dr_grpo \
     --num_iterations 1 \
     --do_eval False \
