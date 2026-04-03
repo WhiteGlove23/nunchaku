@@ -226,3 +226,7 @@ tensorboard_logs/
 scripts/run_py
 scripts/models
 scripts/test_data
+
+eval_results/
+outputs/
+secure_checkpoints/

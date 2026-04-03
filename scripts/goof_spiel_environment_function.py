@@ -409,6 +409,7 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
 ) -> dict[str, list]:
     """
     Parallelized rollout function for game environments.
+    Uses full prompt and completion IDs with action masking.
     """
     # --- Constants ---
     STRATEGY_REWARD = 1.0

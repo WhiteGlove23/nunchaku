@@ -90,56 +90,6 @@ def count_complete_runs(hand: list[str]) -> int:
     return sum(1 for run in runs if len(run) >= 3)
 
 
-def would_complete_run(hand: list[str], card: str) -> bool:
-    """Check if adding this card would complete a run (3+)"""
-    current_runs = find_potential_runs(hand)
-    current_complete = sum(1 for run in current_runs if len(run) >= 3)
-    
-    new_runs = find_potential_runs(hand, card)
-    new_complete = sum(1 for run in new_runs if len(run) >= 3)
-    
-    return new_complete > current_complete
-
-
-def would_improve_run(hand: list[str], card: str) -> bool:
-    """Check if adding this card would improve a potential run (2 -> 3 cards)"""
-    # Check if card fits into any existing 2-card sequence
-    rank = get_rank(card)
-    suit = get_suit(card)
-    rank_idx = RANK_ORDER.index(rank)
-    
-    for existing_card in hand:
-        if get_suit(existing_card) != suit:
-            continue
-        
-        existing_rank_idx = RANK_ORDER.index(get_rank(existing_card))
-        
-        # Check if adjacent
-        if abs(rank_idx - existing_rank_idx) == 1:
-            # Found an adjacent card, now check if we have another to make 3
-            test_hand = hand + [card]
-            runs = find_potential_runs(test_hand)
-            for run in runs:
-                if card in run and len(run) >= 3:
-                    return True
-    
-    return False
-
-
-def would_complete_set(hand: list[str], card: str) -> bool:
-    """Check if adding this card would complete a set (3+ same rank)"""
-    rank = get_rank(card)
-    same_rank_count = sum(1 for c in hand if get_rank(c) == rank)
-    return same_rank_count >= 2  # Adding this would make 3+
-
-
-def would_improve_set(hand: list[str], card: str) -> bool:
-    """Check if adding this card would start a pair"""
-    rank = get_rank(card)
-    same_rank_count = sum(1 for c in hand if get_rank(c) == rank)
-    return same_rank_count == 1  # We have 1, this makes a pair
-
-
 @dataclass
 class GameState:
     """Simple game state - expand this gradually"""
@@ -347,180 +297,69 @@ def parse_game_state(observation: str) -> GameState:
     
 
 class RewardCalculator:
-    """Calculate rewards using state history"""
-    
-    def __init__(self, gamma: float = 0.99):
-        """
-        Args:
-            gamma: Discount factor (0.99 = later rewards matter more)
-        """
-        self.gamma = gamma
-        
-        # Reward weights
-        self.deadwood_weight = 0.5
-        self.high_card_penalty = -0.2
-        
-        # Meld rewards
-        self.pair_bonus = 2.0
-        self.set_bonus = 10.0
-        self.potential_run_bonus = 3.0
-        self.run_bonus = 12.0
-        
-        # Penalties
-        self.break_pair_penalty = -2.0
-        self.break_set_penalty = -10.0
-        self.break_run_penalty = -12.0
-        
-        # Strategic rewards
-        self.knock_ready_bonus = 20.0
-        self.discard_useful_penalty = -2.0
-        self.missed_opportunity_penalty = -3.0
-        self.picked_up_useless_upcard_penalty = -3.0
-        
-        
+    """
+    Deadwood-based continuous reward calculator.
+
+    Primary signal: deadwood improvement ratio (always available, even on truncation).
+    Terminal bonus: win/loss when game completes.
+    Invalid penalty: small per-step penalty for invalid actions.
+    """
+
+    def __init__(self):
+        self.invalid_penalty = -0.1
+
     def calculate_step_reward(
         self,
         states: list[GameState],
         action: str,
-        env_reward: float
+        env_reward: float,
+        is_invalid: bool = False,
     ) -> float:
         """
-        Calculate immediate reward for this step (no discounting here).
-        
-        Args:
-            states: List of GameState objects (last item = current state)
-            action: Action that was taken
-            env_reward: Terminal reward from environment
-            
-        Returns:
-            Immediate step reward (not discounted)
+        Per-step reward. Only tracks invalid actions now.
         """
-        if len(states) < 2:
-            return 0.0
-        
-        prev_state = states[-2]
-        current_state = states[-1]
-        
-        reward = 0.0
-        
-        # R1: Deadwood reduction
-        deadwood_change = prev_state.deadwood - current_state.deadwood
-        reward += self.deadwood_weight * deadwood_change
-        
-        # R2: High card penalty
-        reward += self.high_card_penalty * current_state.num_high_cards()
-        
-        # R3: Pair formation/breaking
-        prev_pairs = prev_state.count_pairs()
-        curr_pairs = current_state.count_pairs()
-        pair_change = curr_pairs - prev_pairs
-        
-        if pair_change > 0:
-            reward += self.pair_bonus * pair_change
-        elif pair_change < 0:
-            reward += self.break_pair_penalty * abs(pair_change)
-        
-        # R4: Set completion/breaking
-        prev_sets = prev_state.count_sets()
-        curr_sets = current_state.count_sets()
-        set_change = curr_sets - prev_sets
-        
-        if set_change > 0:
-            reward += self.set_bonus * set_change
-        elif set_change < 0:
-            reward += self.break_set_penalty * abs(set_change)
-        
-        # R5: Run completion/breaking
-        prev_runs = prev_state.count_runs()
-        curr_runs = current_state.count_runs()
-        run_change = curr_runs - prev_runs
-        
-        if run_change > 0:
-            reward += self.run_bonus * run_change
-        elif run_change < 0:
-            reward += self.break_run_penalty * abs(run_change)
-        
-        # R6: Potential run formation
-        prev_potential_runs = prev_state.count_potential_runs()
-        curr_potential_runs = current_state.count_potential_runs()
-        potential_run_change = curr_potential_runs - prev_potential_runs
-        
-        if potential_run_change > 0:
-            reward += self.potential_run_bonus * potential_run_change
-        
-        # R7: Knock readiness
-        if current_state.can_knock() and not prev_state.can_knock():
-            reward += self.knock_ready_bonus
-        
-        # R8: Discard awareness - did we discard something useful?
-        if prev_state.phase == 'Discard' and len(current_state.discard_pile) > len(prev_state.discard_pile):
-            newly_discarded = [c for c in current_state.discard_pile if c not in prev_state.discard_pile]
-            if newly_discarded:
-                discarded_card = newly_discarded[0]
-                discarded_rank = get_rank(discarded_card)
-                same_rank_in_hand = sum(1 for c in prev_state.hand if get_rank(c) == discarded_rank)
-                
-                if same_rank_in_hand >= 2:
-                    reward += self.discard_useful_penalty
-                
-                if would_improve_run(prev_state.hand, discarded_card):
-                    reward += self.discard_useful_penalty
-        
-        # R9: Missed opportunity - didn't pick up a useful upcard
-        if prev_state.phase == 'Draw' and prev_state.upcard != 'XX':
-            upcard = prev_state.upcard
-            
-            if action == '53':  # Drew from stock instead of upcard
-                # Penalize missed opportunity to complete set or run
-                if would_complete_set(prev_state.hand, upcard):
-                    reward += self.missed_opportunity_penalty
-                elif would_complete_run(prev_state.hand, upcard):
-                    reward += self.missed_opportunity_penalty
-            else: # Drew from upcard
-                # Penalize if picked up a not useful upcard, only useful if it completes a set or run
-                if not (
-                    would_complete_set(prev_state.hand, upcard) or 
-                    would_complete_run(prev_state.hand, upcard)
-                ):
-                    reward += self.picked_up_useless_upcard_penalty
-        
-        # R10: Terminal reward (only added on final step)
-        if env_reward != 0:
-            reward += max(min(env_reward * 100.0, 50.0), -50.0)
-        
-        return reward
-    
-    def calculate_discounted_return(self, rewards: list[float]) -> float:
+        if is_invalid:
+            return self.invalid_penalty
+        return 0.0
+
+    def calculate_episode_reward(
+        self,
+        step_rewards: list[float],
+        env_reward: float,
+        done: bool,
+        initial_state: GameState | None,
+        final_state: GameState | None,
+    ) -> float:
         """
-        Apply discounting to list of step rewards (called ONCE at episode end).
-        Later rewards weighted more heavily.
-        
-        Args:
-            rewards: List of immediate step rewards [r_0, r_1, r_2, ..., r_T]
-            
-        Returns:
-            Discounted return where later rewards matter more
-            
-        Example:
-            rewards = [1.0, 2.0, 5.0, 10.0]
-            With gamma=0.99:
-            - r_0 (early) gets weight gamma^3 = 0.99^3 ≈ 0.970
-            - r_1 gets weight gamma^2 = 0.99^2 ≈ 0.980
-            - r_2 gets weight gamma^1 = 0.99^1 = 0.990
-            - r_3 (late) gets weight 1.0 (full weight)
+        Combine deadwood improvement + terminal bonus + invalid penalties.
         """
-        if not rewards:
-            return 0.0
-        
-        T = len(rewards)
-        discounted_sum = 0.0
-        
-        for i, reward in enumerate(rewards):
-            # Later rewards (higher i) get less discounting (closer to 1.0)
-            discount_factor = self.gamma ** (T - 1 - i)
-            discounted_sum += discount_factor * reward
-        
-        return discounted_sum
+        # 1. Deadwood improvement (always available, even on truncation)
+        if initial_state and final_state and initial_state.deadwood > 0:
+            deadwood_component = (initial_state.deadwood - final_state.deadwood) / initial_state.deadwood
+        else:
+            deadwood_component = 0.0
+
+        # 2. Terminal bonus / truncation penalty
+        terminal = 0.0
+        if done:
+            if env_reward > 0.5:
+                terminal = 1.0
+                if final_state and final_state.deadwood == 0:
+                    terminal += 0.25  # gin bonus
+            else:
+                terminal = -0.5
+        elif final_state:
+            # Truncated episode: penalize proportionally to remaining deadwood
+            terminal = -final_state.deadwood / 100.0
+
+        # 3. Invalid action penalty (accumulated, clipped)
+        invalid_total = sum(r for r in step_rewards if r < 0)
+        invalid_total = max(invalid_total, -0.3)
+
+        if deadwood_component < 0.0:
+            deadwood_component *= 1.5
+
+        return deadwood_component + terminal + invalid_total
     
     
 REASONING_TAG_PAIRS = [
@@ -553,7 +392,20 @@ def remove_reasoning_tags(text: str) -> str:
 
     cleaned = re.sub(r"\n\s*\n\s*\n", "\n\n", cleaned)
     return cleaned.strip()
-    
+
+
+def extract_action_id(completion_text: str) -> str:
+    """
+    Extract a clean numeric action ID from model completion text.
+    """
+    cleaned = remove_reasoning_tags(completion_text)
+    if cleaned.endswith("</s>"):
+        cleaned = cleaned[:-5].strip()
+    if "Action:" in cleaned:
+        cleaned = cleaned.split("Action:")[-1].strip()
+    match = re.search(r"-?\d+", cleaned)
+    return match.group(0) if match else cleaned.strip()
+
     
 class CurriculumScheduler:
     """
@@ -564,17 +416,27 @@ class CurriculumScheduler:
         initial_max_turn=1,
         final_max_turn=13,
         rollouts_per_stage=1280,
-        initial_hint_prob=0.5,
+        initial_hint_prob=0.8,
         final_hint_prob=0.0,
+        hint_decay_optimizer_steps=100,
         warmup_rollouts=128,
+        mcts_warmup_optimizer_steps=None,
+        initial_mcts_sims=5,
+        final_mcts_sims=25,
     ):
         self.initial_max_turn = initial_max_turn
         self.final_max_turn = final_max_turn
         self.rollouts_per_stage = rollouts_per_stage
         self.initial_hint_prob = initial_hint_prob
         self.final_hint_prob = final_hint_prob
+        self.hint_decay_optimizer_steps = hint_decay_optimizer_steps
         self.warmup_rollouts = warmup_rollouts
-        
+        self.mcts_warmup_optimizer_steps = (
+            0 if mcts_warmup_optimizer_steps is None else mcts_warmup_optimizer_steps
+        )
+        self.initial_mcts_sims = initial_mcts_sims
+        self.final_mcts_sims = final_mcts_sims
+
         self.total_rollouts = 0
         
     def get_max_turn(self):
@@ -594,33 +456,39 @@ class CurriculumScheduler:
         )
         return current_max_turn
     
-    def get_hint_prob(self):
-        """Calculate current hint probability based on curriculum."""
-        if self.total_rollouts < self.warmup_rollouts:
-            # During warmup, always hint
-            return self.initial_hint_prob
-        
-        # Linearly decay from initial to final over training
-        # Decay over the course of reaching final_max_turn
-        total_stages = self.final_max_turn - self.initial_max_turn
-        total_decay_rollouts = total_stages * self.rollouts_per_stage
-        
-        adjusted_rollouts = self.total_rollouts - self.warmup_rollouts
-        progress = min(adjusted_rollouts / total_decay_rollouts, 1.0)
-        
-        current_prob = self.initial_hint_prob - progress * (self.initial_hint_prob - self.final_hint_prob)
+    def get_hint_prob(self, optimizer_step: Optional[int] = None):
+        """Calculate current hint probability from optimizer-step progress."""
+        current_step = 0 if optimizer_step is None else optimizer_step
+        if self.hint_decay_optimizer_steps <= 0:
+            return self.final_hint_prob
+        progress = min(max(current_step, 0) / self.hint_decay_optimizer_steps, 1.0)
+        current_prob = self.initial_hint_prob - progress * (
+            self.initial_hint_prob - self.final_hint_prob
+        )
         return max(current_prob, self.final_hint_prob)
-    
+
+    def get_mcts_sims(self, optimizer_step: Optional[int] = None):
+        """Calculate current MCTS simulations based on curriculum progress."""
+        current_step = 0 if optimizer_step is None else optimizer_step
+        if self.mcts_warmup_optimizer_steps <= 0:
+            return self.final_mcts_sims
+        progress = min(max(current_step, 0) / self.mcts_warmup_optimizer_steps, 1.0)
+        return int(
+            self.initial_mcts_sims
+            + progress * (self.final_mcts_sims - self.initial_mcts_sims)
+        )
+
     def step(self, num_rollouts=1):
         """Increment rollout counter."""
         self.total_rollouts += num_rollouts
-        
-    def get_status(self):
+
+    def get_status(self, optimizer_step: Optional[int] = None):
         """Get current curriculum status for logging."""
         return {
             "total_rollouts": self.total_rollouts,
             "max_turn": self.get_max_turn(),
-            "hint_prob": self.get_hint_prob(),
+            "hint_prob": self.get_hint_prob(optimizer_step),
+            "mcts_sims": self.get_mcts_sims(optimizer_step),
         }
         
 
@@ -677,18 +545,39 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
         rollout_last_prompt_and_completion_parallelized_curriculum.generation_semaphore = Semaphore(1)
         rollout_last_prompt_and_completion_parallelized_curriculum.games_to_task_id_range = games_to_task_id_range
         rollout_last_prompt_and_completion_parallelized_curriculum.selected_game = selected_game
-        
+
+        rollout_warmup_rollouts = (
+            trainer.args.rollout_warmup_rollouts
+            if getattr(trainer.args, "rollout_warmup_rollouts", None) is not None
+            else trainer.args.rollouts_per_stage
+        )
+        mcts_warmup_optimizer_steps = getattr(
+            trainer.args, "mcts_warmup_optimizer_steps", None
+        )
+        hint_decay_optimizer_steps = 100
+
         # Initialize curriculum scheduler
         rollout_last_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
-            initial_max_turn=trainer.args.initial_max_turn,
-            final_max_turn=30,
+            initial_max_turn=50,
+            final_max_turn=50,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.5,
             final_hint_prob=0.0,
-            warmup_rollouts=trainer.args.rollouts_per_stage,
+            hint_decay_optimizer_steps=hint_decay_optimizer_steps,
+            warmup_rollouts=rollout_warmup_rollouts,
+            mcts_warmup_optimizer_steps=mcts_warmup_optimizer_steps,
+            initial_mcts_sims=25,
+            final_mcts_sims=25,
         )
-        
-        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=30, rollouts_per_stage={trainer.args.rollouts_per_stage}, warmup_rollouts={trainer.args.rollouts_per_stage}")
+
+        print(
+            f"[CURRICULUM] Initialized with initial_max_turn={50}, final_max_turn={50}, "
+            f"rollouts_per_stage={trainer.args.rollouts_per_stage}, "
+            f"rollout_warmup_rollouts={rollout_warmup_rollouts}, "
+            f"hint_decay_optimizer_steps={hint_decay_optimizer_steps}, "
+            f"mcts_warmup_optimizer_steps={mcts_warmup_optimizer_steps}, "
+            f"mcts_sims=25->25 (constant)"
+        )
 
     # Retrieve static variables
     rank = rollout_last_prompt_and_completion_parallelized_curriculum.rank
@@ -703,9 +592,14 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
     
     # Get current curriculum parameters
     total_rollouts = curriculum.total_rollouts
+    current_optimizer_step = getattr(getattr(trainer, "state", None), "global_step", 0)
     current_max_turn = curriculum.get_max_turn()
-    current_hint_prob = curriculum.get_hint_prob()
-    print(f"[CURRICULUM] Rollout {total_rollouts}: max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}")
+    current_hint_prob = curriculum.get_hint_prob(current_optimizer_step)
+    current_mcts_sims = curriculum.get_mcts_sims(current_optimizer_step)
+    print(
+        f"[CURRICULUM] Rollout {total_rollouts}, step {current_optimizer_step}: "
+        f"max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}, mcts_sims={current_mcts_sims}"
+    )
 
     def run_single_prompt(index: int, prompt: str):
         # Generate a random game_id for this episode
@@ -724,12 +618,12 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
         game_state_history: list[GameState] = []
         rewards = []
         calculator = RewardCalculator()
-        
+
         # Determine if this episode gets hints
         use_hints = random.random() < current_hint_prob
-        
+
         # --- Reset Environment (POST /reset) ---
-        payload = {"task_id": game_id, "seed": game_id, "opponent": "mcts", "mcts_max_simulations": 25, "mcts_num_rollouts": 1}
+        payload = {"task_id": game_id, "seed": random.randint(0, 2**31 - 1), "opponent": "mcts", "mcts_max_simulations": current_mcts_sims, "mcts_num_rollouts": 1}
 
         try:
             reset_res = requests.post(f"{env_endpoint}/reset", json=payload, timeout=TIMEOUT)
@@ -777,13 +671,7 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
             messages.append({"role": "assistant", "content": completion_text})
 
             # --- Parse Action ---
-            action_to_send = remove_reasoning_tags(completion_text)
-            if action_to_send.endswith("</s>"):
-                action_to_send = action_to_send[:-5]
-
-            # Parse ReAct format
-            if "Action:" in action_to_send:
-                action_to_send = action_to_send.split("Action:")[-1].strip()
+            action_to_send = extract_action_id(completion_text)
 
             # --- Step Environment (POST /step) ---
             try:
@@ -817,41 +705,37 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
             else:
                 messages.append({"role": "user", "content": formatted_observation})
                 
-            # Parse Game State
+            # Parse Game State and calculate step reward
             if not is_invalid and not done:
-                # Normal, not invalid and not done
                 try:
                     game_state = parse_game_state(formatted_observation)
                 except Exception as e:
-                    # Failed to parse game state, probaly invalid action in previous turn, skip parsing for this turn
                     print(f"Failed to parse game state: {e}")
-                    immediate_reward = -10.0
+                    immediate_reward = calculator.calculate_step_reward(game_state_history, action_to_send, 0.0, is_invalid=True)
                 else:
                     game_state_history.append(game_state)
-                    # Calculate Reward
                     immediate_reward = calculator.calculate_step_reward(game_state_history, action_to_send, 0.0)
             elif is_invalid:
-                # Invalid action
-                immediate_reward = -10.0
+                immediate_reward = calculator.calculate_step_reward(game_state_history, action_to_send, 0.0, is_invalid=True)
             else:
-                # Done
-                # Re-calculate game reward
-                game_reward = step_reward - 0.5
-                immediate_reward = max(min(game_reward * 100.0, 50.0), -50.0)
+                # Done — step reward handled by calculate_episode_reward
+                immediate_reward = 0.0
 
             rewards.append(immediate_reward)
             turn_number += 1
-            
-        # Calculate discounted return
-        discounted_return = calculator.calculate_discounted_return(rewards)
-        train_reward = discounted_return
-        
+
+        # Calculate episode reward (deadwood improvement + terminal + invalid penalties)
+        initial_state = game_state_history[0] if game_state_history else None
+        final_state = game_state_history[-1] if game_state_history else None
+        episode_reward = calculator.calculate_episode_reward(rewards, final_reward, done, initial_state, final_state)
+        train_reward = episode_reward
+
         initial_dw = game_state_history[0].deadwood if game_state_history else 0
         final_dw = game_state_history[-1].deadwood if game_state_history else 0
-        
+
         # Single-line episode summary
         print(f"[ID:{game_id} Hints:{int(use_hints)} Done:{int(done)} T:{turn_number:2d} "
-            f"Ret:{discounted_return:6.2f} EnvR:{final_reward:5.1f} "
+            f"Ret:{episode_reward:6.2f} EnvR:{final_reward:5.1f} "
             f"DW:{initial_dw:2d}→{final_dw:2d} Inv:{invalid_count}")
 
         return index, {
@@ -917,7 +801,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
     """
     # --- Constants for context length management ---
     MAX_EPISODE_TOKENS = 16384  # Max tokens for completion sequence (truncate if exceeded)
-    MAX_PROMPT_LEN = 5000      # Max prompt tokens before ending episode early
+    MAX_PROMPT_LEN = 16384 - 256      # Max prompt tokens before ending episode early
     
     games_to_task_id_range = {
         "goofspiel": (0, 99999999),
@@ -963,18 +847,39 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         rollout_full_prompt_and_completion_parallelized_curriculum.generation_semaphore = Semaphore(1)
         rollout_full_prompt_and_completion_parallelized_curriculum.games_to_task_id_range = games_to_task_id_range
         rollout_full_prompt_and_completion_parallelized_curriculum.selected_game = selected_game
-        
+
+        rollout_warmup_rollouts = (
+            trainer.args.rollout_warmup_rollouts
+            if getattr(trainer.args, "rollout_warmup_rollouts", None) is not None
+            else trainer.args.rollouts_per_stage
+        )
+        mcts_warmup_optimizer_steps = getattr(
+            trainer.args, "mcts_warmup_optimizer_steps", None
+        )
+        hint_decay_optimizer_steps = 100
+
         # Initialize curriculum scheduler
         rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
-            initial_max_turn=trainer.args.initial_max_turn,
-            final_max_turn=30,
+            initial_max_turn=50,
+            final_max_turn=50,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.5,
             final_hint_prob=0.0,
-            warmup_rollouts=trainer.args.rollouts_per_stage,
+            hint_decay_optimizer_steps=hint_decay_optimizer_steps,
+            warmup_rollouts=rollout_warmup_rollouts,
+            mcts_warmup_optimizer_steps=mcts_warmup_optimizer_steps,
+            initial_mcts_sims=25,
+            final_mcts_sims=25,
         )
-        
-        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=30, rollouts_per_stage={trainer.args.rollouts_per_stage}, warmup_rollouts={trainer.args.rollouts_per_stage}")
+
+        print(
+            f"[CURRICULUM] Initialized with initial_max_turn={50}, final_max_turn={50}, "
+            f"rollouts_per_stage={trainer.args.rollouts_per_stage}, "
+            f"rollout_warmup_rollouts={rollout_warmup_rollouts}, "
+            f"hint_decay_optimizer_steps={hint_decay_optimizer_steps}, "
+            f"mcts_warmup_optimizer_steps={mcts_warmup_optimizer_steps}, "
+            f"mcts_sims=25->25 (constant)"
+        )
 
     # Retrieve static variables
     rank = rollout_full_prompt_and_completion_parallelized_curriculum.rank
@@ -989,9 +894,14 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
     
     # Get current curriculum parameters
     total_rollouts = curriculum.total_rollouts
+    current_optimizer_step = getattr(getattr(trainer, "state", None), "global_step", 0)
     current_max_turn = curriculum.get_max_turn()
-    current_hint_prob = curriculum.get_hint_prob()
-    print(f"[CURRICULUM] Rollout {total_rollouts}: max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}")
+    current_hint_prob = curriculum.get_hint_prob(current_optimizer_step)
+    current_mcts_sims = curriculum.get_mcts_sims(current_optimizer_step)
+    print(
+        f"[CURRICULUM] Rollout {total_rollouts}, step {current_optimizer_step}: "
+        f"max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}, mcts_sims={current_mcts_sims}"
+    )
 
     def run_single_prompt(index: int, prompt: str):
         # Generate a random game_id for this episode
@@ -1015,12 +925,12 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         game_state_history: list[GameState] = []
         rewards = []
         calculator = RewardCalculator()
-        
+
         # Determine if this episode gets hints
         use_hints = random.random() < current_hint_prob
-        
+
         # --- Reset Environment (POST /reset) ---
-        payload = {"task_id": game_id, "seed": game_id, "opponent": "mcts", "mcts_max_simulations": 25, "mcts_num_rollouts": 1}
+        payload = {"task_id": game_id, "seed": random.randint(0, 2**31 - 1), "opponent": "mcts", "mcts_max_simulations": current_mcts_sims, "mcts_num_rollouts": 1}
 
         try:
             reset_res = requests.post(f"{env_endpoint}/reset", json=payload, timeout=TIMEOUT)
@@ -1063,6 +973,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             completion_ids = rollout_outputs.get("completion_ids", [])
             logprobs = rollout_outputs.get("logprobs", [])
             completion_text = tokenizer.decode(completion_ids, skip_special_tokens=True).strip()
+            action_to_send = extract_action_id(completion_text)
 
             # Check if prompt exceeds max length - end episode early to prevent context overflow
             if len(prompt_ids) > MAX_PROMPT_LEN:
@@ -1101,15 +1012,6 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
                     prev_full_ids = prev_full_ids + completion_ids
             messages.append({"role": "assistant", "content": completion_text})
 
-            # --- Parse Action ---
-            action_to_send = completion_text
-            if action_to_send.endswith("</s>"):
-                action_to_send = action_to_send[:-5]
-
-            # Parse ReAct format
-            if "Action:" in action_to_send:
-                action_to_send = action_to_send.split("Action:")[-1].strip()
-
             # --- Step Environment (POST /step) ---
             try:
                 formatted_observation = ""
@@ -1143,43 +1045,39 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             else:
                 messages.append({"role": "user", "content": formatted_observation})
                 
-            # Parse Game State
+            # Parse Game State and calculate step reward
             if not is_invalid and not done:
-                # Normal, not invalid and not done
                 try:
                     game_state = parse_game_state(formatted_observation)
                 except Exception as e:
-                    # Failed to parse game state, probaly invalid action in previous turn, skip parsing for this turn
                     print(f"Failed to parse game state: {e}")
-                    immediate_reward = -10.0
+                    immediate_reward = calculator.calculate_step_reward(game_state_history, action_to_send, 0.0, is_invalid=True)
                 else:
                     game_state_history.append(game_state)
-                    # Calculate Reward
                     immediate_reward = calculator.calculate_step_reward(game_state_history, action_to_send, 0.0)
             elif is_invalid:
-                # Invalid action
-                immediate_reward = -10.0
+                immediate_reward = calculator.calculate_step_reward(game_state_history, action_to_send, 0.0, is_invalid=True)
             else:
-                # Done
-                # Re-calculate game reward
-                game_reward = step_reward - 0.5
-                immediate_reward = max(min(game_reward * 100.0, 50.0), -50.0)
-                
+                # Done — step reward handled by calculate_episode_reward
+                immediate_reward = 0.0
+
             rewards.append(immediate_reward)
             turn_number += 1
-            
-        # Calculate discounted return
-        discounted_return = calculator.calculate_discounted_return(rewards)
-        train_reward = discounted_return
-        
+
+        # Calculate episode reward (deadwood improvement + terminal + invalid penalties)
+        initial_state = game_state_history[0] if game_state_history else None
+        final_state = game_state_history[-1] if game_state_history else None
+        episode_reward = calculator.calculate_episode_reward(rewards, final_reward, done, initial_state, final_state)
+        train_reward = episode_reward
+
         initial_dw = game_state_history[0].deadwood if game_state_history else 0
         final_dw = game_state_history[-1].deadwood if game_state_history else 0
-        
+
         # Single-line episode summary
         print(f"[ID:{game_id} Hints:{int(use_hints)} Done:{int(done)} T:{turn_number:2d} "
-            f"Ret:{discounted_return:6.2f} EnvR:{final_reward:5.1f} "
+            f"Ret:{episode_reward:6.2f} EnvR:{final_reward:5.1f} "
             f"DW:{initial_dw:2d}→{final_dw:2d} Inv:{invalid_count}")
-        
+
         # Truncate episode if completion sequence exceeds max length
         if len(episode_completion_ids) > MAX_EPISODE_TOKENS:
             print(f"Warning: Episode completion exceeded {MAX_EPISODE_TOKENS} tokens ({len(episode_completion_ids)}), truncating")

@@ -38,52 +38,74 @@ GRPO_CONFIG = {
         "rollouts_per_stage": 1280,
     },
     "2_4_b": {
-        "lr": 8e-6,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 2,
-        "batch_size": 2,
-        "gradient_accumulation_steps": 8,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 16,
         "vllm_gpu_memory_utilization": 0.3,
         "use_lora": True,
         "beta": 0.01,
-        "num_generations": 4,
+        "num_generations": 8,
         "rollouts_per_stage": 1280,
+        "rollout_warmup_rollouts": 0,
+        "mcts_warmup_optimizer_steps": 20,
+    },
+    "2_4_b_qwen": {
+        "lr": 1e-4,
+        "distributed": "ddp",
+        "gpu_count": 2,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 16,
+        "vllm_gpu_memory_utilization": 0.3,
+        "use_lora": True,
+        "beta": 0.01,
+        "num_generations": 8,
+        "rollouts_per_stage": 1280,
+        "rollout_warmup_rollouts": 0,
+        "mcts_warmup_optimizer_steps": 20,
     },
     "4_5_b": {
-        "lr": 6e-6,
+        "lr": 1e-4,
         "distributed": "ddp",
         "gpu_count": 2,
-        "batch_size": 2,
-        "gradient_accumulation_steps": 8,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 16,
         "use_lora": True,
         "vllm_gpu_memory_utilization": 0.35,  # Reduced for Gin Rummy
         "beta": 0.01,
-        "num_generations": 4,
+        "num_generations": 8,
         "rollouts_per_stage": 1280,
+        "rollout_warmup_rollouts": 0,
+        "mcts_warmup_optimizer_steps": 20,
     },
     "5_6_b": {
-        "lr": 6e-6,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 2,
-        "batch_size": 2,
-        "gradient_accumulation_steps": 8,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 16,
         "use_lora": True,
         "vllm_gpu_memory_utilization": 0.35,  # Reduced for Gin Rummy
         "beta": 0.01,
-        "num_generations": 4,
+        "num_generations": 8,
         "rollouts_per_stage": 1280,
+        "rollout_warmup_rollouts": 0,
+        "mcts_warmup_optimizer_steps": 20,
     },
     "6_9_b": {
-        "lr": 6e-6,
+        "lr": 1e-5,
         "distributed": "ddp",
         "gpu_count": 4,
-        "batch_size": 2,
-        "gradient_accumulation_steps": 4,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 16,
         "use_lora": True,
         "vllm_gpu_memory_utilization": 0.35,  # Reduced for Gin Rummy (longer episodes = more KV cache)
         "beta": 0.01,
-        "num_generations": 4,
+        "num_generations": 8,
         "rollouts_per_stage": 1024,  # Increased from 768 for better curriculum
+        "rollout_warmup_rollouts": 0,
+        "mcts_warmup_optimizer_steps": 20,
     },
     "9_12_b": {
         "lr": 6e-6,
@@ -93,6 +115,8 @@ GRPO_CONFIG = {
         "batch_size": 16,
         "vllm_gpu_memory_utilization": 0.6,
         "beta": 0.01,
+        "rollout_warmup_rollouts": 0,
+        "mcts_warmup_optimizer_steps": 20,
     },
     "12_15_b": {
         "lr": 5e-6,
@@ -232,9 +256,9 @@ def get_run_cmd(config: dict, gpu_nums: int):
     --beta {beta} \
     --num_generations {num_generations} \
     --loss_type dr_grpo \
-    --num_iterations 2 \
+    --num_iterations 1 \
     --do_eval False \
-    --vllm_max_model_length 5248"""
+    --vllm_max_model_length 16384"""
     )
 
     if config.get("use_lora", False):
@@ -246,6 +270,8 @@ def get_run_cmd(config: dict, gpu_nums: int):
         template += " --use_vllm True"
     else:
         template += " --use_vllm False"
+
+    template += f" --log_completions False"
 
     if run_type == "ds":
         template = template + """ --deepspeed ds_config/zero3.json"""
@@ -266,6 +292,10 @@ def get_run_cmd(config: dict, gpu_nums: int):
         template = template + f" --initial_max_turn {config.get('initial_max_turn', 2)}"
     if config.get("rollouts_per_stage", 1280) != 1280:
         template = template + f" --rollouts_per_stage {config.get('rollouts_per_stage', 1280)}"
+    if config.get("rollout_warmup_rollouts") is not None:
+        template = template + f" --rollout_warmup_rollouts {config.get('rollout_warmup_rollouts')}"
+    if config.get("mcts_warmup_optimizer_steps") is not None:
+        template = template + f" --mcts_warmup_optimizer_steps {config.get('mcts_warmup_optimizer_steps')}"
         
     print(f"template: {template}", flush=True)
     return template
@@ -277,6 +307,8 @@ def get_training_json(train_info: dict) -> dict:
     model_architecture = get_model_architecture(model_path)
     param_nums = get_model_num_params(model_name, model_path)
     config = get_grpo_config(param_nums)
+    if model_name == "Qwen/Qwen2.5-3B-Instruct":
+        config = GRPO_CONFIG["2_4_b_qwen"]
     if model_name in ["mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Mistral-7B-Instruct-v0.2"]:
         config = GRPO_CONFIG["6_9_b"]
     print(f"config: {config}")
@@ -304,7 +336,10 @@ def get_training_json(train_info: dict) -> dict:
         "num_generations": config.get("num_generations", 4),
         "initial_max_turn": config.get("initial_max_turn", 2),
         "rollouts_per_stage": config.get("rollouts_per_stage", 1280),
+        "rollout_warmup_rollouts": config.get("rollout_warmup_rollouts"),
+        "mcts_warmup_optimizer_steps": config.get("mcts_warmup_optimizer_steps"),
         "environment_name": train_info.get("dataset_type", {}).get("environment_name"),
+        "log_completions": config.get("log_completions", True),
     }
 
     if model_name == "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5":
