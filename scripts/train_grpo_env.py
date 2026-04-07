@@ -59,6 +59,10 @@ from liars_dice_environment_function import (
     rollout_full_prompt_and_completion_parallelized_curriculum as liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum,
     rollout_reward_func as liars_dice_rollout_reward_func,
 )
+from leduc_poker_environment_function import (
+    rollout_full_prompt_and_completion_parallelized_curriculum as leduc_poker_rollout_full_prompt_and_completion_parallelized_curriculum,
+    rollout_reward_func as leduc_poker_rollout_reward_func,
+)
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
 STANDARD_GRPO_EXTRA_COLUMN = "extra_data"
@@ -826,6 +830,8 @@ def main():
             max_steps = 900
         elif training_args.environment_name == "gin_rummy":
             max_steps = 300
+        elif training_args.environment_name == "leduc_poker":
+            max_steps = 900
         else:
             max_steps = train_request.get("max_steps", -1)
         log_info(f"max_steps: {max_steps}")
@@ -863,9 +869,13 @@ def main():
                 rollout_func = liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = liars_dice_rollout_reward_func
                 trainer_class = ActionMaskedGRPOTrainer
+            elif training_args.environment_name == "leduc_poker":
+                rollout_func = leduc_poker_rollout_full_prompt_and_completion_parallelized_curriculum
+                reward_func = leduc_poker_rollout_reward_func
+                trainer_class = ActionMaskedGRPOTrainer
             else:
                 raise ValueError(f"Unsupported environment_name: {training_args.environment_name}")
-            
+
             print(f"Training reasoning model with {trainer_class.__name__}")
             training_args.max_completion_length = 2048
             training_args.vllm_max_model_length += 2048
@@ -903,9 +913,13 @@ def main():
                 rollout_func = liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = liars_dice_rollout_reward_func
                 trainer_class = ActionMaskedGRPOTrainer
+            elif training_args.environment_name == "leduc_poker":
+                rollout_func = leduc_poker_rollout_full_prompt_and_completion_parallelized_curriculum
+                reward_func = leduc_poker_rollout_reward_func
+                trainer_class = ActionMaskedGRPOTrainer
             else:
                 raise ValueError(f"Unsupported environment_name: {training_args.environment_name}")
-            
+
             print("Training reasoning model with GRPOTrainer")
             training_args.max_completion_length = 16
             trainer = trainer_class(
@@ -941,9 +955,13 @@ def main():
                 rollout_func = liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = liars_dice_rollout_reward_func
                 trainer_class = ActionMaskedGRPOTrainer
+            elif training_args.environment_name == "leduc_poker":
+                rollout_func = leduc_poker_rollout_full_prompt_and_completion_parallelized_curriculum
+                reward_func = leduc_poker_rollout_reward_func
+                trainer_class = ActionMaskedGRPOTrainer
             else:
                 raise ValueError(f"Unsupported environment_name: {training_args.environment_name}")
-                
+
             # Full prompt and completion rollout use ActionMaskedGRPOTrainer
             training_args.max_completion_length = 16
             print("Training non-reasoning model with ActionMaskedGRPOTrainer")
