@@ -37,10 +37,11 @@ MCTS_CONFIG = {
 # Reward-shaping constants
 # ---------------------------------------------------------------------------
 INVALID_ACTION_PENALTY = 0.10
-FOLD_WITH_STRONG_HAND_PENALTY = 0.08
+FOLD_WITH_STRONG_HAND_PENALTY = 0.05
 VALUE_BET_BONUS = 0.04
-BLUFF_QUALITY_BONUS = 0.03
+BLUFF_QUALITY_BONUS = 0.02
 PASSIVE_WITH_STRONG_PENALTY = 0.04
+FOLD_WEAK_HAND_BONUS = 0.02
 SHAPING_REWARD_CLIP = 0.25
 TERMINAL_REWARD_CLIP = 1.00
 
@@ -49,12 +50,12 @@ CARD_RANK = {"J": 0, "Q": 1, "K": 2}
 
 STRATEGY_TIPS = """
 STRATEGY TIPS:
-- Raise with pairs (your card matches the community card) — they are very strong.
-- Bluff occasionally with weak hands to keep opponents guessing.
-- Call with medium-strength hands; don't fold too often.
-- If community card matches your card, bet aggressively for value.
-- Consider pot odds: only call if the pot offers enough reward for your hand strength.
-- Position matters: acting second gives you information from opponent's action.
+- With a King: Raise for value, especially if it pairs the community card.
+- With a Queen: Play cautiously. Call most bets; raise only with a pair.
+- With a Jack: Minimize losses. Check/call cheaply; fold against heavy aggression unless you have a pair.
+- PAIR (your card matches community card): Always raise aggressively.
+- NO PAIR post-flop with low card: Prefer checking/calling. Fold vs large raises.
+- Do NOT raise every hand. Selective aggression wins; constant raising is exploitable.
 """
 
 REASONING_TAG_PAIRS = [
@@ -376,7 +377,7 @@ def _score_action_quality(
     # 3. Bluff quality: raising pre-flop with a weak hand is strategically
     #    sound in Leduc (balanced range). Only reward if not obviously strong
     #    to avoid double-counting with value-bet bonus.
-    if action_type == "raise" and round_number == 1 and strength < 0.5:
+    if action_type == "raise" and round_number == 1 and strength <= 0.5:
         reward += BLUFF_QUALITY_BONUS
 
     # 4. Passive with strong hand post-flop
@@ -387,6 +388,10 @@ def _score_action_quality(
         and can_raise
     ):
         reward -= PASSIVE_WITH_STRONG_PENALTY
+
+    # 5. Fold-to-save: folding weak hand post-flop is good risk management
+    if action_type == "fold" and round_number == 2 and strength < 0.3:
+        reward += FOLD_WEAK_HAND_BONUS
 
     return reward
 
@@ -507,9 +512,9 @@ def _initialize_rollout_state(trainer) -> None:
 
     env_pool = _build_env_pool(server_urls)
     rollout_per_stage = int(getattr(trainer.args, "rollouts_per_stage", 1280))
-    initial_max_turn = int(getattr(trainer.args, "initial_max_turn", 2))
+    initial_max_turn = int(getattr(trainer.args, "initial_max_turn", 4))
     final_max_turn = int(os.environ.get("LEDUC_POKER_FINAL_MAX_TURN", "8"))
-    initial_hint_prob = float(os.environ.get("LEDUC_POKER_INITIAL_HINT_PROB", "0.0"))
+    initial_hint_prob = float(os.environ.get("LEDUC_POKER_INITIAL_HINT_PROB", "0.5"))
     final_hint_prob = float(os.environ.get("LEDUC_POKER_FINAL_HINT_PROB", "0.0"))
 
     _ROLLOUT_STATE["rank"] = rank
@@ -644,6 +649,8 @@ Examples:
 - For action "0 -> Fold": respond "0"
 - For action "1 -> Call": respond "1"
 - For action "2 -> Raise": respond "2"
+
+CRITICAL: Your entire response must be a single number. No words, no punctuation, no explanation.
 """
     if use_hints:
         system_prompt += "\n" + STRATEGY_TIPS

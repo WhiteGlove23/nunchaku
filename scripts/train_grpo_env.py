@@ -872,6 +872,7 @@ def main():
             elif training_args.environment_name == "leduc_poker":
                 rollout_func = leduc_poker_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = leduc_poker_rollout_reward_func
+                training_args.initial_max_turn = 8
                 trainer_class = ActionMaskedGRPOTrainer
             else:
                 raise ValueError(f"Unsupported environment_name: {training_args.environment_name}")
@@ -916,6 +917,7 @@ def main():
             elif training_args.environment_name == "leduc_poker":
                 rollout_func = leduc_poker_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = leduc_poker_rollout_reward_func
+                training_args.initial_max_turn = 8
                 trainer_class = ActionMaskedGRPOTrainer
             else:
                 raise ValueError(f"Unsupported environment_name: {training_args.environment_name}")
@@ -958,6 +960,7 @@ def main():
             elif training_args.environment_name == "leduc_poker":
                 rollout_func = leduc_poker_rollout_full_prompt_and_completion_parallelized_curriculum
                 reward_func = leduc_poker_rollout_reward_func
+                training_args.initial_max_turn = 8
                 trainer_class = ActionMaskedGRPOTrainer
             else:
                 raise ValueError(f"Unsupported environment_name: {training_args.environment_name}")
