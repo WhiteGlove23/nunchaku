@@ -448,36 +448,6 @@ def _select_fallback_action(
     return sorted(legal_action_map.keys(), key=lambda x: int(x))[0]
 
 
-def _extract_terminal_reward(step_block: dict, observation_text: str) -> float:
-    """Pull the terminal reward from the server response."""
-    info = step_block.get("info", {}) if isinstance(step_block, dict) else {}
-
-    cumulative_reward = info.get("cumulative_reward")
-    if isinstance(cumulative_reward, (int, float)):
-        return _clamp(float(cumulative_reward), -TERMINAL_REWARD_CLIP, TERMINAL_REWARD_CLIP)
-
-    your_return_match = re.search(r"Your Return:\s*([+-]?\d+(?:\.\d+)?)", observation_text or "")
-    if your_return_match:
-        return _clamp(float(your_return_match.group(1)), -TERMINAL_REWARD_CLIP, TERMINAL_REWARD_CLIP)
-
-    normalized_match = re.search(r"Normalized Score:\s*([+-]?\d+(?:\.\d+)?)", observation_text or "")
-    result_match = re.search(r"Result:\s*(WIN|LOSS|DRAW)", observation_text or "", flags=re.IGNORECASE)
-    if normalized_match:
-        normalized_value = float(normalized_match.group(1))
-        if result_match:
-            result = result_match.group(1).upper()
-            if result == "LOSS":
-                normalized_value = -abs(normalized_value) if normalized_value != 0 else -1.0
-            elif result == "WIN":
-                normalized_value = abs(normalized_value) if normalized_value != 0 else 1.0
-            else:
-                normalized_value = 0.0
-        return _clamp(normalized_value, -TERMINAL_REWARD_CLIP, TERMINAL_REWARD_CLIP)
-
-    step_reward = _safe_float(step_block.get("reward", 0.0), default=0.0)
-    return _clamp(step_reward, -TERMINAL_REWARD_CLIP, TERMINAL_REWARD_CLIP)
-
-
 # ---------------------------------------------------------------------------
 # Environment pool / initialisation
 # ---------------------------------------------------------------------------
@@ -837,8 +807,6 @@ def _rollout_parallelized_curriculum(
                 accumulated_shaping_reward -= INVALID_ACTION_PENALTY
 
             if done:
-                # Use step_reward directly (like gin_rummy) — _extract_terminal_reward
-                # can return 0 when info.cumulative_reward is 0, masking the real outcome.
                 final_reward = _clamp(step_reward, -TERMINAL_REWARD_CLIP, TERMINAL_REWARD_CLIP)
                 termination_reason = "done"
             else:
