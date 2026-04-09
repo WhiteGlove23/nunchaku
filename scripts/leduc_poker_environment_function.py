@@ -37,12 +37,12 @@ MCTS_CONFIG = {
 # Reward-shaping constants
 # ---------------------------------------------------------------------------
 INVALID_ACTION_PENALTY = 0.10
-FOLD_WITH_STRONG_HAND_PENALTY = 0.05
-VALUE_BET_BONUS = 0.04
-BLUFF_QUALITY_BONUS = 0.02
-PASSIVE_WITH_STRONG_PENALTY = 0.04
-FOLD_WEAK_HAND_BONUS = 0.02
-SHAPING_REWARD_CLIP = 0.25
+FOLD_WITH_STRONG_HAND_PENALTY = 0.0
+VALUE_BET_BONUS = 0.0
+BLUFF_QUALITY_BONUS = 0.0
+PASSIVE_WITH_STRONG_PENALTY = 0.0
+FOLD_WEAK_HAND_BONUS = 0.0
+SHAPING_REWARD_CLIP = 0.10
 TERMINAL_REWARD_CLIP = 1.00
 
 # Card strength in Leduc Poker: K > Q > J
@@ -837,7 +837,9 @@ def _rollout_parallelized_curriculum(
                 accumulated_shaping_reward -= INVALID_ACTION_PENALTY
 
             if done:
-                final_reward = _extract_terminal_reward(last_step_block, formatted_observation)
+                # Use step_reward directly (like gin_rummy) — _extract_terminal_reward
+                # can return 0 when info.cumulative_reward is 0, masking the real outcome.
+                final_reward = _clamp(step_reward, -TERMINAL_REWARD_CLIP, TERMINAL_REWARD_CLIP)
                 termination_reason = "done"
             else:
                 messages.append({"role": "user", "content": formatted_observation})
