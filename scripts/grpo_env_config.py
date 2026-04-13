@@ -38,7 +38,7 @@ GRPO_CONFIG = {
         "rollouts_per_stage": 1280,
     },
     "2_4_b": {
-        "lr": 1e-5,
+        "lr": 2e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -52,7 +52,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "2_4_b_qwen": {
-        "lr": 1e-5,
+        "lr": 2e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -66,7 +66,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "4_5_b": {
-        "lr": 1e-5,
+        "lr": 2e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -80,7 +80,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "5_6_b": {
-        "lr": 1e-5,
+        "lr": 2e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 1,
@@ -94,7 +94,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "6_9_b": {
-        "lr": 1e-5,
+        "lr": 2e-5,
         "distributed": "ddp",
         "gpu_count": 4,
         "batch_size": 1,
