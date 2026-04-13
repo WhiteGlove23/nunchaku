@@ -29,8 +29,8 @@ MAX_PROMPT_LEN = 16384 - 512
 
 MCTS_CONFIG = {
     "opponent": "mcts",
-    "mcts_max_simulations": 100,
-    "mcts_num_rollouts": 2,
+    "mcts_max_simulations": 225,
+    "mcts_num_rollouts": 1,
 }
 
 # Reward settings
@@ -464,7 +464,7 @@ def _build_env_pool(server_urls: list[str]) -> list[dict[str, str]]:
     for idx, base_url in enumerate(server_urls):
         try:
             print(f"[INIT] Initializing env on server {idx}: {base_url}")
-            payload = {"task_id": init_task_id, "seed": 42, **MCTS_CONFIG}
+            payload = {"task_id": init_task_id, "seed": random.randint(0, 2**31 - 1), **MCTS_CONFIG}
             res = requests.post(f"{base_url}/reset", json=payload, timeout=INIT_TIMEOUT_SECONDS)
             res.raise_for_status()
             env_pool.append({"base_url": base_url})
