@@ -58,9 +58,11 @@ from gin_rummy_environment_function import (
 from liars_dice_environment_function import (
     rollout_full_prompt_and_completion_parallelized_curriculum as liars_dice_rollout_full_prompt_and_completion_parallelized_curriculum,
     rollout_reward_func as liars_dice_rollout_reward_func,
+    rollout_last_prompt_and_completion_parallelized_curriculum as liars_dice_rollout_last_prompt_and_completion_parallelized_curriculum
 )
 from leduc_poker_environment_function import (
     rollout_full_prompt_and_completion_parallelized_curriculum as leduc_poker_rollout_full_prompt_and_completion_parallelized_curriculum,
+    rollout_last_prompt_and_completion_parallelized_curriculum as leduc_poker_rollout_last_prompt_and_completion_parallelized_curriculum,
     rollout_reward_func as leduc_poker_rollout_reward_func,
 )
 
@@ -906,7 +908,7 @@ def main():
                 training_args.initial_max_turn = 1
                 trainer_class = GRPOTrainer
             elif training_args.environment_name == "gin_rummy":
-                rollout_func = gin_rummy_rollout_full_prompt_and_completion_parallelized_curriculum
+                rollout_func = gin_rummy_rollout_last_prompt_and_completion_parallelized_curriculum
                 reward_func = gin_rummy_rollout_reward_func
                 training_args.initial_max_turn = 50
                 trainer_class = GRPOTrainer
