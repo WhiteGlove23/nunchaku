@@ -263,7 +263,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
 
     if config.get("use_lora", False):
         template += (
-            " --use_peft --lora_r 32 --lora_alpha 64 --lora_target_modules all-linear"
+            " --use_peft --lora_r 64 --lora_alpha 128 --lora_target_modules all-linear"
         )
 
     if config.get("use_vllm", True):
