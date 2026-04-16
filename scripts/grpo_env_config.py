@@ -94,7 +94,7 @@ GRPO_CONFIG = {
         "mcts_warmup_optimizer_steps": 20,
     },
     "6_9_b": {
-        "lr": 2e-5,
+        "lr": 1e-6,
         "distributed": "ddp",
         "gpu_count": 4,
         "batch_size": 1,
@@ -263,7 +263,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
 
     if config.get("use_lora", False):
         template += (
-            " --use_peft --lora_r 64 --lora_alpha 128 --lora_target_modules all-linear"
+            " --use_peft --lora_r 32 --lora_alpha 64 --lora_target_modules all-linear"
         )
 
     if config.get("use_vllm", True):
